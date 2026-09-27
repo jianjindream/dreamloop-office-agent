@@ -34,6 +34,12 @@ const router = createRouter({
           meta: { title: '工具中心', eyebrow: 'Tools & MCP' },
         },
         {
+          path: 'status',
+          name: 'status',
+          component: () => import('@/pages/StatusPage.vue'),
+          meta: { title: '系统状态', eyebrow: 'System Health' },
+        },
+        {
           path: 'settings',
           name: 'settings',
           component: () => import('@/pages/SettingsPage.vue'),

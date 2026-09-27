@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  Activity,
   Blocks,
   ChevronDown,
   Files,
@@ -24,9 +25,10 @@ const router = useRouter()
 
 const navigation = [
   { label: 'AI 对话', to: '/chat', icon: MessageSquareText },
-  { label: '知识库', to: '/knowledge', icon: LibraryBig, badge: '12' },
+  { label: '知识库', to: '/knowledge', icon: LibraryBig },
   { label: '文档', to: '/documents', icon: Files },
   { label: '工具中心', to: '/tools', icon: Blocks },
+  { label: '系统状态', to: '/status', icon: Activity },
 ]
 
 const recentChats = computed(() => chatStore.sortedSessions.slice(0, 5))
@@ -95,7 +97,6 @@ const formatTime = (timestamp: number) => {
       >
         <component :is="item.icon" :size="18" stroke-width="1.9" />
         <span>{{ item.label }}</span>
-        <small v-if="item.badge">{{ item.badge }}</small>
       </RouterLink>
     </nav>
 
@@ -562,8 +563,7 @@ const formatTime = (timestamp: number) => {
   .workspace-switcher,
   .new-chat,
   .recent-section,
-  .sidebar-footer,
-  .nav-item:nth-child(4) {
+  .sidebar-footer {
     display: none;
   }
 

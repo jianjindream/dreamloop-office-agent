@@ -2,26 +2,97 @@ export interface ToolSummary {
   name: string
   description: string
   is_mcp?: boolean
-  params?: Array<Record<string, unknown>>
+  params?: ToolParameter[]
 }
 
+export interface ToolParameter {
+  name: string
+  type?: string
+  description?: string
+  required?: boolean
+}
+
+export type EntityId = string | number
+
 export interface DocumentSummary {
-  id: string
+  id: EntityId
   title: string
   docType?: string
   source?: string
+  status?: string
+  createdBy?: string
   createdAt?: string
   updatedAt?: string
+  latestVersion?: number
+  latestVersionId?: EntityId
+}
+
+export interface DocumentVersion {
+  id: EntityId
+  documentId: EntityId
+  version: number
+  contentMd?: string
+  summary?: string
+  metadata?: Record<string, unknown> | string
+  createdAt?: string
+}
+
+export interface DocumentDetail {
+  document: DocumentSummary
+  version?: DocumentVersion | null
+}
+
+export interface UploadResult {
+  filename?: string
+  content_type?: string
+  parser?: string
+  pages?: number
+  text_chars?: number
+  needs_ocr?: boolean
+  document_id?: string
+  version_id?: string
+  chunk_count?: number
+  doc_hash?: string
+  error?: string
+}
+
+export interface McpRegistration {
+  name: string
+  description: string
+  endpoint: string
+  params: ToolParameter[]
+}
+
+export interface ApiOperationResult {
+  ok?: boolean
+  name?: string
+  message?: string
+  error?: string
 }
 
 export interface SystemStatus {
   rag_loaded: boolean
   rag_mode: string
+  rag_chunks?: number | Array<Record<string, unknown>>
+  short_term_count?: number
+  long_term_count?: number
+  preferences?: Record<string, unknown>
   tools_count: number
   llm_model: string
   embedding_model: string
   is_mock: boolean
-  infrastructure: Record<string, unknown>
+  infrastructure: Record<string, string | boolean | number | null>
+}
+
+export interface SnapshotSummary {
+  id?: string
+  sessionId?: string
+  session_id?: string
+  title?: string
+  status?: string
+  createdAt?: string
+  created_at?: string
+  [key: string]: unknown
 }
 
 export interface ChatRequest {

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { Bell, Bot, ChevronRight, Database, KeyRound, Moon, Network, Palette, ShieldCheck, UserRound } from 'lucide-vue-next'
+import { useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const workspace = useWorkspaceStore()
+const router = useRouter()
 const sections = [
   { icon: UserRound, title: '个人资料', desc: '头像、显示名称和个人偏好' },
   { icon: Bot, title: 'AI 模型', desc: '模型、生成参数和回答风格', value: 'qwen-plus' },
@@ -32,7 +34,7 @@ const sections = [
             <span class="setting-icon"><component :is="item.icon" :size="18" /></span><span class="setting-copy"><strong>{{ item.title }}</strong><small>{{ item.desc }}</small></span><span v-if="item.value" class="setting-value">{{ item.value }}</span><ChevronRight :size="15" />
           </button>
         </section>
-        <section class="system-card surface-card"><div><span><i></i>系统运行正常</span><p>所有核心服务均可用，最近检查于 1 分钟前。</p></div><button class="secondary-button" type="button">查看系统状态</button></section>
+        <section class="system-card surface-card"><div><span><i></i>系统状态与连接</span><p>查看模型、知识库与基础设施的实时运行信息。</p></div><button class="secondary-button" type="button" @click="router.push('/status')">查看系统状态</button></section>
       </div>
     </div>
   </div>
