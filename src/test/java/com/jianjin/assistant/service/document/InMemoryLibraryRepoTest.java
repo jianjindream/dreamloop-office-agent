@@ -43,5 +43,16 @@ class InMemoryLibraryRepoTest {
         assertEquals(2, r2.version.getVersion());
         assertEquals(r1.document.getId(), r2.document.getId());
         assertEquals("v2", repo.get(r1.document.getId()).version.getContentMd());
+        var history = repo.listVersions(r1.document.getId());
+        assertEquals(2, history.size());
+        assertEquals("v2", history.get(0).getContentMd());
+        assertEquals("v1", history.get(1).getContentMd());
+        assertEquals("v1", repo.getVersion(r1.version.getId()).getContentMd());
+    }
+
+    @Test
+    void missingVersionHistoryFailsClearly() {
+        InMemoryLibraryRepo repo = new InMemoryLibraryRepo();
+        assertThrows(IllegalArgumentException.class, () -> repo.listVersions("missing"));
     }
 }

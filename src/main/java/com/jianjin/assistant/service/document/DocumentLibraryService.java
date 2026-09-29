@@ -52,6 +52,10 @@ public class DocumentLibraryService {
         return repo.get(documentId);
     }
 
+    public List<DocumentVersion> listVersions(String documentId) {
+        return repo.listVersions(documentId);
+    }
+
     /** 重新把某个文档（或具体版本）写入 RAG。 */
     public Map.Entry<Integer, String> reingest(String documentId, String versionId) {
         DocumentVersion ver;

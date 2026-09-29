@@ -24,6 +24,7 @@ import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -197,6 +198,12 @@ public class AgentController {
         return out;
     }
 
+    /** GET /api/documents/{id}/versions — 按新到旧查看版本。 */
+    @GetMapping("/documents/{id}/versions")
+    public List<com.jianjin.assistant.domain.document.DocumentVersion> listDocumentVersions(@PathVariable("id") String id) {
+        return library.listVersions(id);
+    }
+
     /** POST /api/documents — 由前端直接写入新文档（标题 / 正文 / docType / ingestToRAG） */
     @PostMapping("/documents")
     public Map<String, Object> writeDocument(@RequestBody Map<String, Object> req) {
@@ -205,7 +212,7 @@ public class AgentController {
         String docType = (String) req.getOrDefault("doc_type", "note");
         boolean ingest = Boolean.TRUE.equals(req.get("ingest_to_rag"));
         WriteRequest wr = new WriteRequest(title, docType, Document.SOURCE_UPLOAD, "user",
-                content, "", new LinkedHashMap<>());
+                content, "", documentMetadata(req));
         DocumentLibraryService.Result res = library.writeDocument(wr, ingest);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("document", res.document);
@@ -216,6 +223,36 @@ public class AgentController {
             out.put("doc_hash", res.ingestDocHash);
         }
         return out;
+    }
+
+    /** PUT /api/documents/{id} — 更新正文或标题，并创建不可变的新版本。 */
+    @PutMapping("/documents/{id}")
+    public Map<String, Object> updateDocument(@PathVariable("id") String id, @RequestBody Map<String, Object> req) {
+        var current = library.get(id);
+        String title = (String) req.getOrDefault("title", current.document.getTitle());
+        String content = (String) req.getOrDefault("content_md", current.version.getContentMd());
+        String docType = (String) req.getOrDefault("doc_type", current.document.getDocType());
+        Map<String, Object> metadata = new LinkedHashMap<>(current.version.getMetadata());
+        metadata.putAll(documentMetadata(req));
+        WriteRequest wr = new WriteRequest(title, docType, current.document.getSource(),
+                current.document.getCreatedBy(), content, current.version.getSummary(), metadata);
+        wr.setDocumentId(id);
+        DocumentLibraryService.Result res = library.writeDocument(wr, Boolean.TRUE.equals(req.get("ingest_to_rag")));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("document", res.document);
+        out.put("version", res.version);
+        out.put("created", false);
+        return out;
+    }
+
+    private Map<String, Object> documentMetadata(Map<String, Object> req) {
+        Object value = req.get("metadata");
+        if (!(value instanceof Map<?, ?> raw)) return new LinkedHashMap<>();
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        raw.forEach((key, item) -> {
+            if (key instanceof String) metadata.put((String) key, item);
+        });
+        return metadata;
     }
 
     /** POST /api/docs/delete — 删除指定文档的所有 chunks */

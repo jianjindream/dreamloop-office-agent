@@ -10,13 +10,15 @@ import {
   Sun,
 } from 'lucide-vue-next'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { useDocumentCanvasStore } from '@/stores/documentCanvas'
 import { agentApi } from '@/api/agent'
 
 const route = useRoute()
 const workspace = useWorkspaceStore()
+const canvas = useDocumentCanvasStore()
 const title = computed(() => String(route.meta.title ?? 'DreamLoop'))
 const eyebrow = computed(() => String(route.meta.eyebrow ?? 'AI Workspace'))
-const supportsContext = computed(() => Boolean(route.meta.showContext))
+const supportsContext = computed(() => Boolean(route.meta.showContext) && !canvas.open)
 const serviceStatus = ref<'checking' | 'online' | 'offline'>('checking')
 let statusTimer: number | undefined
 

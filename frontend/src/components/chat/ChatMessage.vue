@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Check, Copy, RefreshCw, Sparkles, Square, ThumbsDown, ThumbsUp, UserRound } from 'lucide-vue-next'
+import { Check, Copy, FilePlus2, RefreshCw, Sparkles, Square, ThumbsDown, ThumbsUp, UserRound } from 'lucide-vue-next'
 import { ref } from 'vue'
 import type { ChatMessage } from '@/stores/chat'
 import ExecutionTimeline from './ExecutionTimeline.vue'
@@ -7,7 +7,7 @@ import MarkdownContent from './MarkdownContent.vue'
 import SourceList from './SourceList.vue'
 
 const props = defineProps<{ message: ChatMessage }>()
-const emit = defineEmits<{ retry: [messageId: string] }>()
+const emit = defineEmits<{ retry: [messageId: string]; toDocument: [messageId: string] }>()
 const copied = ref(false)
 
 const copyMessage = async () => {
@@ -36,6 +36,7 @@ const copyMessage = async () => {
         <SourceList :sources="message.sources" />
         <div v-if="message.status === 'complete'" class="message-actions">
           <button type="button" :aria-label="copied ? '已复制' : '复制回答'" @click="copyMessage"><Check v-if="copied" :size="14" /><Copy v-else :size="14" /><span>{{ copied ? '已复制' : '复制' }}</span></button>
+          <button type="button" aria-label="将回答转为文档" @click="emit('toDocument', message.id)"><FilePlus2 :size="14" /><span>转为文档</span></button>
           <button type="button" aria-label="重新生成" @click="emit('retry', message.id)"><RefreshCw :size="14" /></button>
           <span></span><button type="button" aria-label="有帮助"><ThumbsUp :size="14" /></button><button type="button" aria-label="没有帮助"><ThumbsDown :size="14" /></button>
         </div>

@@ -21,10 +21,12 @@ import {
 import { agentApi } from '@/api/agent'
 import ChatMessageView from '@/components/chat/ChatMessage.vue'
 import { useChatStore, type ChatMessage } from '@/stores/chat'
+import { useDocumentCanvasStore } from '@/stores/documentCanvas'
 import { useWorkspaceStore } from '@/stores/workspace'
 import type { ChatResponse, ChatStreamEvent, SearchResult, ToolSummary } from '@/types/api'
 
 const chat = useChatStore()
+const canvas = useDocumentCanvasStore()
 const workspace = useWorkspaceStore()
 const prompt = ref('')
 const isStreaming = ref(false)
@@ -36,6 +38,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const availableTools = ref<ToolSummary[]>([])
 const selectedTools = ref<string[]>([])
 const toolMenuOpen = ref(false)
+const includeDocument = ref(true)
 const attachment = ref<{ name: string; status: 'uploading' | 'ready' | 'error' } | null>(null)
 
 const messages = computed(() => chat.currentSession?.messages ?? [])
@@ -157,9 +160,12 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
   await scrollToBottom()
 
   try {
+    const documentContext = canvas.open && includeDocument.value && canvas.content.trim()
+      ? `\n\n[当前关联文档：${canvas.title}]\n${canvas.content.slice(0, 12000)}\n[/当前关联文档]`
+      : ''
     await agentApi.streamChat(
       {
-        message: text,
+        message: `${text}${documentContext}`,
         use_rag: workspace.knowledgeEnabled,
         selected_tools: selectedTools.value,
         explicit: selectedTools.value.length > 0,
@@ -194,6 +200,19 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
     abortController.value = null
     scrollToBottom()
   }
+}
+
+const toDocument = (messageId: string) => {
+  const session = chat.currentSession
+  const index = session?.messages.findIndex((message) => message.id === messageId) ?? -1
+  if (!session || index < 0) return
+  const message = session.messages[index]
+  if (!message?.content.trim()) return
+  if (canvas.open && canvas.dirty && !window.confirm('当前文档有未保存的修改，确定要用此回答创建新草稿吗？')) return
+  const question = [...session.messages.slice(0, index)].reverse().find((item) => item.role === 'user')?.content ?? ''
+  const heading = message.content.match(/^#{1,3}\s+(.+)$/m)?.[1]
+  const title = (heading || question.replace(/\s+/g, ' ').slice(0, 36) || '对话生成的文档').trim()
+  canvas.openDraft(title, message.content, session.id, message.id)
 }
 
 const stopGeneration = async () => {
@@ -275,10 +294,11 @@ onBeforeUnmount(() => abortController.value?.abort())
     </div>
 
     <section v-else ref="messageList" class="message-list" aria-live="polite">
-      <ChatMessageView v-for="message in messages" :key="message.id" :message="message" @retry="retryMessage" />
+      <ChatMessageView v-for="message in messages" :key="message.id" :message="message" @retry="retryMessage" @to-document="toDocument" />
     </section>
 
     <div class="composer-area">
+      <button v-if="canvas.open && canvas.content.trim()" class="document-context-chip" :class="{ active: includeDocument }" type="button" @click="includeDocument = !includeDocument"><FileText :size="13" />{{ includeDocument ? '已引用' : '未引用' }}：{{ canvas.title }}<Check v-if="includeDocument" :size="12" /></button>
       <div v-if="attachment" class="attachment-chip" :class="attachment.status">
         <FileText :size="14" /><span>{{ attachment.name }}</span>
         <LoaderCircle v-if="attachment.status === 'uploading'" class="spinning" :size="13" />
@@ -293,7 +313,7 @@ onBeforeUnmount(() => abortController.value?.abort())
           <div class="composer-tools">
             <input ref="fileInput" class="sr-only" type="file" accept=".pdf,.txt,.md,text/plain,text/markdown,application/pdf" @change="uploadAttachment" />
             <button type="button" aria-label="添加附件" title="添加附件" @click="chooseAttachment"><Paperclip :size="17" /></button>
-            <button type="button" aria-label="引用内容" title="引用内容"><AtSign :size="17" /></button>
+            <button type="button" aria-label="引用当前文档" title="引用当前文档" :disabled="!canvas.open" @click="includeDocument = !includeDocument"><AtSign :size="17" /></button>
             <span class="toolbar-divider"></span>
             <button class="context-chip" :class="{ active: workspace.knowledgeEnabled }" type="button" @click="workspace.toggleKnowledge"><ShieldCheck :size="14" />知识库<Check v-if="workspace.knowledgeEnabled" :size="12" /></button>
             <div class="tool-selector">
@@ -315,6 +335,7 @@ onBeforeUnmount(() => abortController.value?.abort())
 
 <style scoped>
 .chat-page { display: flex; width: 100%; min-height: 100%; padding: 34px 30px 30px; flex-direction: column; align-items: center; justify-content: center; }.chat-page.has-messages { height: 100%; min-height: 0; padding: 0; justify-content: flex-start; }.welcome-canvas { width: min(760px,100%); }.welcome-block { text-align: center; }.ai-orb { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 54px; margin-bottom: 15px; border: 1px solid color-mix(in srgb,var(--brand) 20%,var(--border)); border-radius: 18px; background: linear-gradient(145deg,var(--bg-elevated),var(--brand-softer)); color: var(--brand); box-shadow: 0 14px 34px rgba(88,77,210,.12); }.ai-orb span { position: absolute; width: 32px; height: 32px; border-radius: 50%; background: color-mix(in srgb,var(--brand) 18%,transparent); filter: blur(12px); }.ai-orb svg { position: relative; }.welcome-block em { display: block; color: var(--brand); font-size: 10px; font-style: normal; font-weight: 700; letter-spacing: .08em; }.welcome-block h2 { margin: 8px 0 0; color: var(--text-strong); font-size: clamp(25px,3vw,32px); font-weight: 680; letter-spacing: -.045em; }.welcome-block p { margin: 10px 0 0; color: var(--text-muted); font-size: 13px; }
+.document-context-chip{display:flex;align-items:center;max-width:100%;gap:5px;margin:0 0 7px 3px;padding:6px 9px;overflow:hidden;border:1px solid var(--border);border-radius:8px;background:var(--bg-elevated);color:var(--text-muted);font-size:9px;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.document-context-chip.active{border-color:color-mix(in srgb,var(--brand) 25%,var(--border));background:var(--brand-softer);color:var(--brand)}
 .suggestion-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 32px; }.suggestion-card { display: flex; align-items: center; min-width: 0; gap: 11px; padding: 13px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb,var(--bg-elevated) 90%,transparent); box-shadow: var(--shadow-sm); text-align: left; cursor: pointer; transition: 170ms; }.suggestion-card:hover { border-color: color-mix(in srgb,var(--brand) 22%,var(--border)); background: var(--bg-elevated); box-shadow: var(--shadow-md); transform: translateY(-2px); }.suggestion-icon { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; flex: 0 0 auto; border-radius: 11px; }.suggestion-icon.violet{background:var(--brand-soft);color:var(--brand)}.suggestion-icon.blue{background:#eaf3ff;color:#3978bd}.suggestion-icon.amber{background:var(--warning-soft);color:var(--warning)}.suggestion-icon.green{background:var(--success-soft);color:var(--success)}.suggestion-card>span:nth-child(2){display:flex;min-width:0;flex:1;flex-direction:column}.suggestion-card strong{color:var(--text-strong);font-size:12px;font-weight:630}.suggestion-card small{margin-top:4px;overflow:hidden;color:var(--text-faint);font-size:9px;text-overflow:ellipsis;white-space:nowrap}.suggestion-arrow{color:var(--text-faint);opacity:0;transform:rotate(45deg);transition:160ms}.suggestion-card:hover .suggestion-arrow{opacity:1}
 .message-list { width: 100%; min-height: 0; flex: 1; overflow-y: auto; padding: 14px 0 180px; scroll-behavior: smooth; }.message-list :deep(.message + .message.assistant) { border-top: 1px solid color-mix(in srgb,var(--border) 65%,transparent); background: color-mix(in srgb,var(--bg-elevated) 28%,transparent); }
 .composer-area { width: min(820px,calc(100% - 48px)); margin-top: 16px; }.has-messages .composer-area { position: absolute; z-index: 5; right: 0; bottom: 0; left: 0; width: min(820px,calc(100% - 48px)); margin: 0 auto; padding: 20px 0 16px; background: linear-gradient(0deg,var(--bg-app) 72%,transparent); }.attachment-chip { display: flex; align-items: center; width: fit-content; max-width: 100%; gap: 6px; margin: 0 0 7px 3px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elevated); color: var(--text-muted); font-size: 8px; box-shadow: var(--shadow-sm); }.attachment-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.attachment-chip.ready{color:var(--success)}.attachment-chip.error{color:var(--danger)}.attachment-chip button{display:inline-flex;padding:0;border:0;background:transparent;color:inherit;cursor:pointer}.spinning{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}

@@ -118,6 +118,20 @@ public class InMemoryLibraryRepo implements LibraryRepo {
         }
     }
 
+    @Override
+    public List<DocumentVersion> listVersions(String documentId) {
+        if (documentId == null || documentId.isEmpty()) {
+            throw new IllegalArgumentException("document_id is required");
+        }
+        synchronized (mu) {
+            List<DocumentVersion> history = versions.get(documentId);
+            if (history == null) throw new IllegalArgumentException("document not found: " + documentId);
+            List<DocumentVersion> result = new ArrayList<>(history.size());
+            for (int i = history.size() - 1; i >= 0; i--) result.add(copyOf(history.get(i)));
+            return result;
+        }
+    }
+
     // ─────────────────────────── 浅拷贝（避免外部修改内部状态） ───────────────────────────
 
     private static Document copyOf(Document d) {

@@ -1,52 +1,87 @@
 <script setup lang="ts">
-import { Clock3, FilePlus2, FileText, LayoutGrid, List, MoreHorizontal, Plus, Search, Sparkles } from 'lucide-vue-next'
+import { computed, onMounted, ref, watch } from 'vue'
+import { Clock3, FilePlus2, FileText, LayoutGrid, List, Plus, RefreshCw, Search, Sparkles } from 'lucide-vue-next'
+import { agentApi } from '@/api/agent'
+import { useDocumentCanvasStore } from '@/stores/documentCanvas'
+import type { DocumentSummary } from '@/types/api'
 
-const documents = [
-  { title: '第三季度经营分析', type: '经营报告', updated: '刚刚编辑', words: '2,840 字', color: 'violet', progress: 86 },
-  { title: '智能办公产品需求文档', type: '产品文档', updated: '昨天编辑', words: '6,120 字', color: 'blue', progress: 64 },
-  { title: '用户访谈洞察总结', type: '研究总结', updated: '9月18日', words: '1,960 字', color: 'green', progress: 92 },
-  { title: 'AI 知识库实施方案', type: '项目方案', updated: '9月16日', words: '4,360 字', color: 'amber', progress: 48 },
-]
+const canvas = useDocumentCanvasStore()
+const documents = ref<DocumentSummary[]>([])
+const loading = ref(false)
+const error = ref('')
+const query = ref('')
+const view = ref<'grid' | 'list'>('grid')
+const filteredDocuments = computed(() => documents.value.filter((doc) =>
+  doc.title.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase())))
+
+const loadDocuments = async () => {
+  loading.value = true
+  error.value = ''
+  try {
+    documents.value = await agentApi.documents()
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : '加载文档失败，请检查后端服务。'
+  } finally {
+    loading.value = false
+  }
+}
+
+const confirmReplace = () => !canvas.open || !canvas.dirty || window.confirm('当前文档有未保存的修改，确定要切换吗？')
+const createDocument = () => {
+  if (confirmReplace()) canvas.openDraft()
+}
+const openDocument = (id: string | number) => {
+  if (confirmReplace()) canvas.openDocument(id)
+}
+const dateLabel = (value?: string) => value ? new Date(value).toLocaleDateString('zh-CN') : '最近编辑'
+
+watch(() => [canvas.documentId, canvas.version], ([id, version], previous) => {
+  if (id && version && (id !== previous?.[0] || version !== previous?.[1])) loadDocuments()
+})
+onMounted(loadDocuments)
 </script>
 
 <template>
   <div class="page-shell documents-page">
     <header class="page-heading">
       <div><h1>AI 文档</h1><p>将对话结果沉淀为可继续编辑和复用的工作成果。</p></div>
-      <button class="primary-button" type="button"><Plus :size="17" /> 新建文档</button>
+      <button class="primary-button" type="button" @click="createDocument"><Plus :size="17" /> 新建文档</button>
     </header>
 
     <section class="template-banner">
       <div class="template-art"><Sparkles :size="24" /></div>
-      <div><span>AI 快速起草</span><h2>从一个想法开始，生成完整文档</h2><p>选择模板或描述目标，DreamLoop 会帮你完成结构、内容与润色。</p></div>
-      <button class="secondary-button" type="button">浏览模板</button>
+      <div><span>AI 文档工作台</span><h2>从一个想法开始，沉淀可编辑的成果</h2><p>新建草稿，或在对话中将 AI 回答转为文档；可用 AI 改写、扩写与总结。</p></div>
+      <button class="secondary-button" type="button" @click="createDocument">开始写作</button>
     </section>
 
     <div class="documents-toolbar">
-      <div><button class="active" type="button">全部文档</button><button type="button">我的文档</button><button type="button">与我共享</button></div>
+      <div><span class="all-documents-label">全部文档 <small>{{ documents.length }}</small></span></div>
       <div class="toolbar-right">
-        <label><Search :size="15" /><input placeholder="搜索文档" /></label>
-        <button class="view-button active" type="button" aria-label="网格视图"><LayoutGrid :size="16" /></button>
-        <button class="view-button" type="button" aria-label="列表视图"><List :size="16" /></button>
+        <label><Search :size="15" /><input v-model="query" placeholder="搜索文档" /></label>
+        <button class="view-button" :class="{ active: view === 'grid' }" type="button" aria-label="网格视图" @click="view = 'grid'"><LayoutGrid :size="16" /></button>
+        <button class="view-button" :class="{ active: view === 'list' }" type="button" aria-label="列表视图" @click="view = 'list'"><List :size="16" /></button>
+        <button class="view-button" type="button" aria-label="刷新文档列表" @click="loadDocuments"><RefreshCw :size="15" /></button>
       </div>
     </div>
 
-    <section class="document-grid">
-      <button class="new-document-card" type="button">
-        <span><FilePlus2 :size="22" /></span><strong>创建空白文档</strong><small>或使用 AI 从模板开始</small>
+    <div v-if="error" class="documents-message error" role="alert">{{ error }} <button type="button" @click="loadDocuments">重试</button></div>
+    <div v-if="loading" class="documents-message">正在加载文档…</div>
+    <section v-else class="document-grid" :class="{ 'list-view': view === 'list' }">
+      <button v-if="!query" class="new-document-card" type="button" @click="createDocument">
+        <span><FilePlus2 :size="22" /></span><strong>创建空白文档</strong><small>在右侧 Canvas 中编辑</small>
       </button>
-      <article v-for="doc in documents" :key="doc.title" class="document-card surface-card">
-        <div class="doc-preview" :class="doc.color">
+      <button v-for="doc in filteredDocuments" :key="doc.id" class="document-card surface-card" type="button" @click="openDocument(doc.id)">
+        <div class="doc-preview violet">
           <div class="preview-lines"><i></i><i></i><i></i><i></i></div>
           <span><FileText :size="20" /></span>
         </div>
         <div class="document-info">
-          <div class="document-title"><div><span>{{ doc.type }}</span><h3>{{ doc.title }}</h3></div><button class="icon-button" type="button"><MoreHorizontal :size="16" /></button></div>
-          <div class="document-meta"><span><Clock3 :size="12" />{{ doc.updated }}</span><span>{{ doc.words }}</span></div>
-          <div class="completion"><span><i :style="{ width: `${doc.progress}%` }"></i></span><small>{{ doc.progress }}% 完成</small></div>
+          <div class="document-title"><div><span>{{ doc.docType || '文档' }}</span><h3>{{ doc.title }}</h3></div></div>
+          <div class="document-meta"><span><Clock3 :size="12" />{{ dateLabel(doc.updatedAt) }}</span><span>版本 {{ doc.latestVersion || 1 }}</span></div>
         </div>
-      </article>
+      </button>
     </section>
+    <div v-if="!loading && !error && query && filteredDocuments.length === 0" class="documents-message">没有找到匹配“{{ query }}”的文档。</div>
   </div>
 </template>
 
@@ -60,6 +95,7 @@ const documents = [
 .template-banner p { margin: 5px 0 0; color: var(--text-muted); font-size: 10px; }
 .template-banner button { position: relative; z-index: 1; }
 .documents-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 25px 0 13px; }
+.all-documents-label{color:var(--text-strong);font-size:11px;font-weight:660}.all-documents-label small{margin-left:5px;color:var(--text-faint);font-size:9px}.documents-message{padding:22px;border:1px solid var(--border);border-radius:12px;background:var(--bg-elevated);color:var(--text-muted);font-size:11px}.documents-message.error{color:var(--danger)}.documents-message button{margin-left:7px;border:0;background:transparent;color:var(--brand);cursor:pointer}
 .documents-toolbar > div:first-child { display: flex; gap: 4px; }
 .documents-toolbar > div:first-child button { padding: 8px 11px; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); font-size: 10px; cursor: pointer; }
 .documents-toolbar > div:first-child button.active { background: var(--bg-elevated); color: var(--text-strong); box-shadow: var(--shadow-sm); font-weight: 620; }
@@ -69,13 +105,14 @@ const documents = [
 .view-button { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--text-faint); cursor: pointer; }
 .view-button.active { border-color: var(--border); background: var(--bg-elevated); color: var(--brand); }
 .document-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
+.document-grid.list-view{grid-template-columns:1fr}.list-view .new-document-card{min-height:72px}.list-view .document-card{display:flex;min-height:72px}.list-view .doc-preview{width:85px;height:72px;flex:0 0 auto}.list-view .document-info{flex:1}.list-view .document-meta{margin-top:6px}
 .new-document-card, .document-card { min-height: 246px; overflow: hidden; }
 .new-document-card { display: flex; align-items: center; justify-content: center; flex-direction: column; border: 1px dashed var(--border-strong); border-radius: 16px; background: color-mix(in srgb, var(--bg-elevated) 55%, transparent); color: var(--text-muted); cursor: pointer; transition: 160ms ease; }
 .new-document-card:hover { border-color: var(--brand); background: var(--brand-softer); color: var(--brand); }
 .new-document-card span { display: inline-flex; align-items: center; justify-content: center; width: 45px; height: 45px; border-radius: 14px; background: var(--bg-elevated); box-shadow: var(--shadow-sm); }
 .new-document-card strong { margin-top: 13px; color: var(--text-strong); font-size: 11px; font-weight: 620; }
 .new-document-card small { margin-top: 5px; color: var(--text-faint); font-size: 9px; }
-.document-card { transition: 170ms ease; }
+.document-card { padding:0;border:1px solid var(--border);background:var(--bg-elevated);text-align:left;cursor:pointer;transition: 170ms ease; }
 .document-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); transform: translateY(-2px); }
 .doc-preview { position: relative; display: flex; align-items: center; justify-content: center; height: 128px; overflow: hidden; }
 .doc-preview.violet { background: linear-gradient(145deg, #efedff, #dad6ff); color: #6358d5; }
@@ -98,5 +135,5 @@ const documents = [
 .completion i { display: block; height: 100%; border-radius: inherit; background: var(--brand); }
 .completion small { color: var(--text-faint); font-size: 7px; }
 @media (max-width: 940px) { .document-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 650px) { .template-banner { align-items: flex-start; flex-wrap: wrap; } .template-banner button { margin-left: 70px; } .documents-toolbar { align-items: flex-start; flex-direction: column; } .document-grid { grid-template-columns: 1fr; } }
+@media (max-width: 650px) { .template-banner { align-items: flex-start; flex-wrap: wrap; gap:12px; padding:18px; } .template-banner > div:nth-child(2) { flex-basis:calc(100% - 68px); } .template-banner h2{font-size:14px}.template-banner p{font-size:10px;line-height:1.5}.template-banner button { margin-left: 64px; } .documents-toolbar { align-items: flex-start; flex-direction: column; } .document-grid { grid-template-columns: 1fr; } }
 </style>

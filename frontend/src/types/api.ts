@@ -42,6 +42,18 @@ export interface DocumentDetail {
   version?: DocumentVersion | null
 }
 
+export interface DocumentWritePayload {
+  title: string
+  content_md: string
+  doc_type?: string
+  metadata?: Record<string, unknown>
+  ingest_to_rag?: boolean
+}
+
+export interface DocumentWriteResult extends DocumentDetail {
+  created: boolean
+}
+
 export interface UploadResult {
   filename?: string
   content_type?: string

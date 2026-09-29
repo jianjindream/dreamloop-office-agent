@@ -3,9 +3,13 @@ import { API_BASE_URL, ApiError, request } from './http'
 import type {
   ApiOperationResult,
   ChatRequest,
+  ChatResponse,
   ChatStreamEvent,
   DocumentDetail,
   DocumentSummary,
+  DocumentVersion,
+  DocumentWritePayload,
+  DocumentWriteResult,
   McpRegistration,
   SnapshotSummary,
   SystemStatus,
@@ -72,6 +76,14 @@ export const agentApi = {
   tools: () => request<ToolSummary[]>('/api/tools'),
   documents: () => request<DocumentSummary[]>('/api/documents'),
   document: (id: string | number) => request<DocumentDetail>(`/api/documents/${encodeURIComponent(id)}`),
+  documentVersions: (id: string | number) => request<DocumentVersion[]>(`/api/documents/${encodeURIComponent(id)}/versions`),
+  createDocument: (payload: DocumentWritePayload) =>
+    request<DocumentWriteResult>('/api/documents', { method: 'POST', body: JSON.stringify(payload) }),
+  updateDocument: (id: string | number, payload: DocumentWritePayload) =>
+    request<DocumentWriteResult>(`/api/documents/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
   snapshots: () => request<SnapshotSummary[]>('/api/snapshots'),
   registerMcp: (payload: McpRegistration) =>
     request<ApiOperationResult>('/api/tools/mcp', {
@@ -84,7 +96,7 @@ export const agentApi = {
       body: JSON.stringify({ doc_hash: docHash }),
     }).then(assertOperation),
   chat: (payload: ChatRequest) =>
-    request<Record<string, unknown>>('/api/chat', {
+    request<ChatResponse>('/api/chat', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

@@ -16,6 +16,9 @@ public interface LibraryRepo {
     /** 按 versionId 取指定历史版本。 */
     DocumentVersion getVersion(String versionId);
 
+    /** 按版本号降序列出文档的历史版本。 */
+    List<DocumentVersion> listVersions(String documentId);
+
     /** Document + 对应版本的元组（避免 Pair 依赖）。 */
     final class DocumentWithVersion {
         public final Document document;

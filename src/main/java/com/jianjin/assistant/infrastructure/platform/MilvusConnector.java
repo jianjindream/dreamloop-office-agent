@@ -25,6 +25,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 
 @Component
 public class MilvusConnector {
@@ -43,6 +45,11 @@ public class MilvusConnector {
     @PostConstruct
     public void init() {
         try {
+            // SDK 的探测请求会在服务离线时长时间重试；先快速检查 TCP，
+            // 让不依赖向量库的文档 API 能及时以降级模式启动。
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress(cfg.getMilvus().getHost(), cfg.getMilvus().getPort()), 1_000);
+            }
             ConnectParam param = ConnectParam.newBuilder()
                     .withHost(cfg.getMilvus().getHost())
                     .withPort(cfg.getMilvus().getPort())
