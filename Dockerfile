@@ -1,9 +1,18 @@
-# ===== 多阶段构建：Maven 编译 + JRE 运行 =====
+# ===== Vue 构建 =====
+FROM node:22-alpine AS frontend-builder
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ===== Maven 编译：把 Vue 产物覆盖旧版静态入口 =====
 FROM maven:3.9-eclipse-temurin-17 AS builder
 WORKDIR /build
 COPY pom.xml .
 RUN mvn -B -q dependency:go-offline
 COPY src ./src
+COPY --from=frontend-builder /frontend/dist/ ./src/main/resources/static/
 RUN mvn -B -q -DskipTests package
 
 # 运行时镜像（轻量 JRE 17）

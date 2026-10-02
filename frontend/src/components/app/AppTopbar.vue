@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   Bell,
   Command,
@@ -11,16 +11,96 @@ import {
 } from 'lucide-vue-next'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useDocumentCanvasStore } from '@/stores/documentCanvas'
+import { useChatStore } from '@/stores/chat'
 import { agentApi } from '@/api/agent'
+import type { DocumentSummary } from '@/types/api'
 
 const route = useRoute()
+const router = useRouter()
 const workspace = useWorkspaceStore()
 const canvas = useDocumentCanvasStore()
+const chat = useChatStore()
 const title = computed(() => String(route.meta.title ?? 'DreamLoop'))
 const eyebrow = computed(() => String(route.meta.eyebrow ?? 'AI Workspace'))
 const supportsContext = computed(() => Boolean(route.meta.showContext) && !canvas.open)
 const serviceStatus = ref<'checking' | 'online' | 'offline'>('checking')
+const paletteOpen = ref(false)
+const search = ref('')
+const searchInput = ref<HTMLInputElement | null>(null)
+const searchDialog = ref<HTMLElement | null>(null)
+const documents = ref<DocumentSummary[]>([])
+const pages = [
+  { label: 'AI 对话', description: '打开聊天工作台', to: '/chat' },
+  { label: '知识库', description: '浏览和上传资料', to: '/knowledge' },
+  { label: 'AI 文档', description: '打开文档工作台', to: '/documents' },
+  { label: '工具中心', description: '查看可用工具', to: '/tools' },
+  { label: '系统状态', description: '查看服务运行情况', to: '/status' },
+  { label: '设置', description: '工作区偏好', to: '/settings' },
+]
+const results = computed(() => {
+  const query = search.value.trim().toLocaleLowerCase()
+  const items = [
+    ...pages.map((item) => ({ ...item, kind: 'page', id: item.to })),
+    ...chat.sortedSessions.slice(0, 10).map((item) => ({ label: item.title, description: '最近对话', to: '/chat', kind: 'chat', id: item.id })),
+    ...documents.value.slice(0, 20).map((item) => ({ label: item.title, description: '文档', to: '/documents', kind: 'document', id: String(item.id) })),
+  ]
+  return items.filter((item) => !query || `${item.label} ${item.description}`.toLocaleLowerCase().includes(query)).slice(0, 12)
+})
 let statusTimer: number | undefined
+let paletteTrigger: HTMLElement | null = null
+
+const openPalette = async () => {
+  paletteTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  paletteOpen.value = true
+  search.value = ''
+  await nextTick()
+  searchInput.value?.focus()
+  try { documents.value = await agentApi.documents() } catch { documents.value = [] }
+}
+
+const closePalette = async () => {
+  paletteOpen.value = false
+  await nextTick()
+  paletteTrigger?.focus()
+  paletteTrigger = null
+}
+
+const selectResult = async (item: (typeof results.value)[number]) => {
+  if (item.kind === 'document' && canvas.open && canvas.dirty && !window.confirm('当前文档有未保存的修改，确定要切换吗？')) return
+  if (item.kind === 'chat') chat.selectSession(item.id)
+  closePalette()
+  await router.push(item.to)
+  if (item.kind === 'document') canvas.openDocument(item.id)
+}
+
+const onGlobalKeydown = (event: KeyboardEvent) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault()
+    if (!paletteOpen.value) openPalette()
+    else closePalette()
+  } else if (event.key === 'Escape' && paletteOpen.value) {
+    event.preventDefault()
+    closePalette()
+  }
+}
+
+const onPaletteKeydown = (event: KeyboardEvent) => {
+  const buttons = Array.from(searchDialog.value?.querySelectorAll<HTMLButtonElement>('.search-result') ?? [])
+  if (event.key === 'Enter' && document.activeElement === searchInput.value && buttons[0]) {
+    event.preventDefault()
+    buttons[0].click()
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+    const next = event.key === 'ArrowDown' ? (index + 1) % buttons.length : (index - 1 + buttons.length) % buttons.length
+    if (buttons.length) buttons[next]?.focus()
+  } else if (event.key === 'Tab') {
+    const focusable = [searchInput.value, ...buttons].filter(Boolean) as HTMLElement[]
+    const index = focusable.indexOf(document.activeElement as HTMLElement)
+    if (event.shiftKey && index === 0) { event.preventDefault(); focusable.at(-1)?.focus() }
+    if (!event.shiftKey && index === focusable.length - 1) { event.preventDefault(); focusable[0]?.focus() }
+  }
+}
 
 const checkService = async () => {
   try {
@@ -34,9 +114,13 @@ const checkService = async () => {
 onMounted(() => {
   checkService()
   statusTimer = window.setInterval(checkService, 30_000)
+  window.addEventListener('keydown', onGlobalKeydown)
 })
 
-onBeforeUnmount(() => window.clearInterval(statusTimer))
+onBeforeUnmount(() => {
+  window.clearInterval(statusTimer)
+  window.removeEventListener('keydown', onGlobalKeydown)
+})
 </script>
 
 <template>
@@ -46,13 +130,14 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
       <h1>{{ title }}</h1>
     </div>
 
-    <button class="command-search" type="button" aria-label="打开全局搜索">
+    <button class="command-search" type="button" aria-label="打开全局搜索" @click="openPalette">
       <Search :size="16" />
       <span>搜索对话、文档或工具</span>
-      <kbd><Command :size="11" /> K</kbd>
+      <kbd>Ctrl / <Command :size="11" /> K</kbd>
     </button>
 
     <div class="top-actions">
+      <button class="icon-button mobile-search" type="button" aria-label="打开全局搜索" @click="openPalette"><Search :size="18" /></button>
       <span class="service-status" :class="serviceStatus"><i></i>{{ serviceStatus === 'online' ? '服务正常' : serviceStatus === 'offline' ? '服务离线' : '正在检查' }}</span>
       <button class="icon-button" type="button" aria-label="通知">
         <Bell :size="18" />
@@ -74,6 +159,12 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
       </button>
     </div>
   </header>
+  <div v-if="paletteOpen" class="search-overlay" @click.self="closePalette">
+    <section ref="searchDialog" class="search-dialog" role="dialog" aria-modal="true" aria-label="全局搜索" @keydown="onPaletteKeydown">
+      <label class="search-field"><Search :size="18" /><input ref="searchInput" v-model="search" aria-label="搜索页面、对话和文档" placeholder="搜索页面、对话和文档…" /><kbd>Esc</kbd></label>
+      <div class="search-results"><button v-for="item in results" :key="`${item.kind}-${item.id}`" class="search-result" type="button" @click="selectResult(item)"><span>{{ item.label }}</span><small>{{ item.description }}</small></button><p v-if="!results.length">没有找到匹配项</p></div>
+    </section>
+  </div>
 </template>
 
 <style scoped>
@@ -217,6 +308,8 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
   background: var(--danger);
 }
 
+.mobile-search{display:none}.search-overlay{position:fixed;z-index:80;inset:0;display:flex;align-items:flex-start;justify-content:center;padding:13vh 16px 20px;background:rgba(15,17,31,.45);backdrop-filter:blur(5px)}.search-dialog{width:min(560px,100%);overflow:hidden;border:1px solid var(--border);border-radius:16px;background:var(--bg-elevated);box-shadow:0 24px 70px rgba(15,17,31,.22)}.search-field{display:flex;align-items:center;gap:10px;padding:16px;border-bottom:1px solid var(--border);color:var(--text-faint)}.search-field:focus-within{box-shadow:inset 0 -2px var(--brand)}.search-field input{min-width:0;flex:1;border:0;outline:0;background:transparent;color:var(--text-strong);font-size:14px}.search-field kbd{padding:4px 6px;border:1px solid var(--border);border-radius:6px;font-size:9px}.search-results{max-height:min(55vh,440px);overflow-y:auto;padding:7px}.search-result{display:flex;align-items:center;justify-content:space-between;width:100%;gap:12px;padding:11px 12px;border:0;border-radius:9px;background:transparent;text-align:left;cursor:pointer}.search-result:hover,.search-result:focus-visible{background:var(--brand-softer);outline:none}.search-result span{color:var(--text-strong);font-size:12px}.search-result small,.search-results p{color:var(--text-faint);font-size:10px}.search-results p{padding:12px}
+
 @media (max-width: 960px) {
   .app-topbar {
     grid-template-columns: minmax(130px, 1fr) minmax(180px, 320px) auto;
@@ -237,5 +330,7 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
   .notification-dot + span {
     display: none;
   }
+
+  .mobile-search{display:inline-flex}
 }
 </style>

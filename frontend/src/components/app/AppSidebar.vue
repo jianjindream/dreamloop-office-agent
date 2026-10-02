@@ -72,19 +72,18 @@ const formatTime = (timestamp: number) => {
       </button>
     </div>
 
-    <button class="workspace-switcher" type="button">
+    <div class="workspace-switcher">
       <span class="workspace-avatar">DL</span>
       <span class="workspace-copy">
         <strong>我的工作空间</strong>
         <small>个人版</small>
       </span>
       <ChevronDown class="workspace-chevron" :size="15" />
-    </button>
+    </div>
 
     <button class="new-chat" type="button" @click="newChat">
       <Plus :size="17" />
       <span>新建对话</span>
-      <kbd>⌘ K</kbd>
     </button>
 
     <nav class="primary-nav" aria-label="主导航">
@@ -93,6 +92,7 @@ const formatTime = (timestamp: number) => {
         :key="item.to"
         :to="item.to"
         class="nav-item"
+        :aria-label="item.label"
         :title="workspace.sidebarCollapsed ? item.label : undefined"
       >
         <component :is="item.icon" :size="18" stroke-width="1.9" />
@@ -103,11 +103,10 @@ const formatTime = (timestamp: number) => {
     <div class="recent-section">
       <div class="section-label">
         <span>最近对话</span>
-        <button type="button" aria-label="更多对话"><MoreHorizontal :size="15" /></button>
       </div>
       <button
         v-for="chat in recentChats"
-        :key="chat.title"
+        :key="chat.id"
         class="recent-item"
         :class="{ active: chat.id === chatStore.currentSessionId }"
         type="button"
@@ -122,18 +121,18 @@ const formatTime = (timestamp: number) => {
     </div>
 
     <div class="sidebar-footer">
-      <RouterLink to="/settings" class="nav-item footer-settings">
+      <RouterLink to="/settings" class="nav-item footer-settings" aria-label="设置">
         <Settings :size="18" stroke-width="1.9" />
         <span>设置</span>
       </RouterLink>
-      <button class="profile" type="button">
+      <div class="profile">
         <span class="profile-avatar">陈</span>
         <span class="profile-copy">
           <strong>陈建金</strong>
           <small>jianjin@example.com</small>
         </span>
         <MoreHorizontal class="profile-more" :size="16" />
-      </button>
+      </div>
     </div>
   </aside>
 </template>

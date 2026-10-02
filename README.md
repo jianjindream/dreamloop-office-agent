@@ -44,13 +44,13 @@ flowchart LR
 | 类别 | 技术 |
 | --- | --- |
 | 后端 | Java 17、Spring Boot 3.2、Maven |
-| 前端 | 原生 HTML / CSS / JavaScript |
+| 前端 | Vue 3、TypeScript、Vite、Pinia |
 | 模型接口 | 火山引擎 Ark 兼容的 Chat Completions 与 Embeddings API |
 | 数据持久化 | PostgreSQL 16 |
 | 检索 | Milvus、Elasticsearch、Neo4j、加权 RRF |
 | 事件 | Kafka（KRaft） |
 | 文档解析 | Apache PDFBox |
-| 测试 | JUnit 5、Spring Boot Test |
+| 测试 | JUnit 5、Spring Boot Test、Vitest、Playwright |
 
 ## 快速开始
 
@@ -58,6 +58,7 @@ flowchart LR
 
 - JDK 17
 - Maven 3.8+
+- Node.js 22（本地开发 Vue 前端时）
 - Docker Desktop 或 Docker Engine（仅完整基础设施、容器部署和 Docker 沙箱需要）
 
 ### 1. 最小模式启动
@@ -68,7 +69,7 @@ flowchart LR
 mvn spring-boot:run
 ```
 
-打开 <http://localhost:8090>，或检查运行状态：
+上述 Maven 命令直接启动时仍使用旧版静态入口。开发 Vue 前端请在另一个终端运行 `cd frontend && npm install && npm run dev`，访问 <http://localhost:5173>；Vite 会把 `/api` 代理到 8090。Docker 构建会自动打包 Vue 页面。也可检查后端运行状态：
 
 ```bash
 curl http://localhost:8090/api/status
@@ -294,7 +295,7 @@ src/main/java/com/jianjin/assistant/
 
 src/main/resources/
 ├── application.yml         # 默认配置
-└── static/index.html       # 单页 Web 客户端
+└── static/index.html       # 旧版入口；Docker 构建时由 Vue 产物覆盖
 ```
 
 ## 构建与测试
@@ -317,6 +318,8 @@ java -jar target/agi-assistant-1.0.0.jar
 ```bash
 docker build -t dreamloop-office-agent .
 ```
+
+Docker 镜像包含 Vue 前端和 Spring Boot 后端。前端单元测试运行 `cd frontend && npm test`；关键流程测试先运行 `npx playwright install chromium`，再运行 `npm run test:e2e`。更多细节见 [前端说明](frontend/README.md)。
 
 ## 内置工具说明
 

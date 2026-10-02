@@ -17,7 +17,23 @@ npm run dev
 npm run build
 ```
 
-构建结果输出到 `dist/`。当前旧版页面仍保留在 Spring Boot 的 `src/main/resources/static/index.html`，生产集成将在后续阶段完成。
+构建结果输出到 `dist/`。Docker 多阶段构建会将该目录复制进 Spring Boot 的静态资源目录，再打包为单个后端镜像；直接在仓库根目录运行 Maven 构建不会自动编译 Vue，仍会使用旧版静态入口。
+
+## 质量检查
+
+```bash
+npm test
+npx playwright install chromium
+npm run test:e2e
+npm run build
+npm audit --registry=https://registry.npmjs.org --audit-level=moderate
+```
+
+端到端测试使用模拟 API，覆盖桌面、平板、手机三个视口的导航、主题、搜索、文档编辑/保存/历史版本及聊天转文档流程。首次运行需要安装 Chromium；后端不必启动。
+
+## Docker 交付
+
+在仓库根目录运行 `docker build -t dreamloop-office-agent .`。镜像内包含 Vue 前端与 Spring Boot 后端；访问 `/chat` 等前端路由时可直接刷新。运行时仍需按项目后端配置提供所需环境变量和基础设施。
 
 ## 目录约定
 

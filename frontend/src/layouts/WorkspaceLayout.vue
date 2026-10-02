@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, defineAsyncComponent } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
 import AppSidebar from '@/components/app/AppSidebar.vue'
 import AppTopbar from '@/components/app/AppTopbar.vue'
 import ContextPanel from '@/components/app/ContextPanel.vue'
-import DocumentCanvas from '@/components/document/DocumentCanvas.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useDocumentCanvasStore } from '@/stores/documentCanvas'
 
 const route = useRoute()
 const workspace = useWorkspaceStore()
 const canvas = useDocumentCanvasStore()
+const DocumentCanvas = defineAsyncComponent(() => import('@/components/document/DocumentCanvas.vue'))
 const showCanvas = computed(() => canvas.open && (route.name === 'chat' || route.name === 'documents'))
 const showContext = computed(() => !showCanvas.value && Boolean(route.meta.showContext) && workspace.contextOpen)
 </script>
@@ -24,10 +24,11 @@ const showContext = computed(() => !showCanvas.value && Boolean(route.meta.showC
       'canvas-visible': showCanvas,
     }"
   >
+    <a class="skip-link" href="#main-content">跳转到主要内容</a>
     <AppSidebar />
     <section class="workspace-main">
       <AppTopbar />
-      <main class="page-stage">
+      <main id="main-content" class="page-stage" tabindex="-1">
         <RouterView />
       </main>
     </section>

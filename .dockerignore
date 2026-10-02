@@ -1,0 +1,12 @@
+.git
+.codex
+.m2-repository
+target
+frontend/node_modules
+frontend/dist
+frontend/coverage
+frontend/test-results
+frontend/playwright-report
+**/.env
+**/.env.*
+src/main/resources/application-local.yml
