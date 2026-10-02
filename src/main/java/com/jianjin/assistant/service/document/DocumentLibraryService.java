@@ -36,9 +36,12 @@ public class DocumentLibraryService {
         Result out = new Result(wr.document, wr.version, wr.created);
         if (ingestToRAG && rag != null) {
             try {
-                Map.Entry<Integer, String> ingest = rag.ingest(wr.version.getContentMd());
+                Object owner = wr.version.getMetadata().get("owner_key");
+                Map.Entry<Integer, String> ingest = rag.ingest(owner == null ? "default:default" : String.valueOf(owner), wr.version.getContentMd());
                 out.ingestChunks = ingest.getKey();
                 out.ingestDocHash = ingest.getValue();
+                repo.putLatestMetadata(wr.document.getId(), "doc_hash", ingest.getValue());
+                out.version.getMetadata().put("doc_hash", ingest.getValue());
             } catch (Exception e) {
                 log.warn("ingest doc to RAG failed: {}", e.getMessage());
             }
@@ -56,6 +59,20 @@ public class DocumentLibraryService {
         return repo.listVersions(documentId);
     }
 
+    public boolean delete(String documentId) {
+        LibraryRepo.DocumentWithVersion current = repo.get(documentId);
+        Object hash = current.version.getMetadata().get("doc_hash");
+        Object owner = current.version.getMetadata().get("owner_key");
+        if (hash != null && rag != null) {
+            try {
+                rag.delete(owner == null ? "default:default" : String.valueOf(owner), String.valueOf(hash));
+            } catch (RuntimeException e) {
+                log.warn("delete document RAG index failed: {}", e.getMessage());
+            }
+        }
+        return repo.delete(documentId);
+    }
+
     /** 重新把某个文档（或具体版本）写入 RAG。 */
     public Map.Entry<Integer, String> reingest(String documentId, String versionId) {
         DocumentVersion ver;
@@ -65,7 +82,8 @@ public class DocumentLibraryService {
             ver = repo.get(documentId).version;
         }
         if (rag == null) throw new IllegalStateException("RagService not available");
-        return rag.ingest(ver.getContentMd());
+        Object owner = ver.getMetadata().get("owner_key");
+        return rag.ingest(owner == null ? "default:default" : String.valueOf(owner), ver.getContentMd());
     }
 
     /** 写入结果（合并 document.WriteResult + 可选的 RAG ingest 摘要）。 */

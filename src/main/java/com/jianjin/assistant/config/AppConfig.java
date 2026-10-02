@@ -5,6 +5,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Component
 @ConfigurationProperties(prefix = "app")
@@ -25,6 +27,7 @@ public class AppConfig {
     private SandboxConfig sandbox = new SandboxConfig();
     private SecurityConfig security = new SecurityConfig();
     private GraphConfig graph = new GraphConfig();
+    private AuthConfig auth = new AuthConfig();
 
     // ===== Inner Config Classes =====
 
@@ -48,6 +51,8 @@ public class AppConfig {
         private String apiUrl;
         private String apiKey;
         private String model;
+        /** Output vector dimension requested from OpenAI-compatible embedding APIs. */
+        private int dimensions = 1024;
 
         public String getApiUrl() { return apiUrl; }
         public void setApiUrl(String apiUrl) { this.apiUrl = apiUrl; }
@@ -55,6 +60,8 @@ public class AppConfig {
         public void setApiKey(String apiKey) { this.apiKey = apiKey; }
         public String getModel() { return model; }
         public void setModel(String model) { this.model = model; }
+        public int getDimensions() { return dimensions; }
+        public void setDimensions(int dimensions) { this.dimensions = dimensions; }
     }
 
     public static class MilvusConfig {
@@ -133,7 +140,7 @@ public class AppConfig {
         private double semanticWeight = 0.7;
         private double keywordWeight = 1.0;
         private boolean enableHybridSearch = true;
-        private int ragMilvusDim = 2048;
+        private int ragMilvusDim = 1024;
 
         /** Query Rewrite（history-aware + multi-query） */
         private RewriteConfig rewrite = new RewriteConfig();
@@ -362,6 +369,7 @@ public class AppConfig {
         private int maxCommandLength = 500;
         private boolean allowlistMode = false;
         private List<String> allowlist = new ArrayList<>();
+        private boolean allowPrivateMcpEndpoints = false;
 
         public int getMaxCommandLength() { return maxCommandLength; }
         public void setMaxCommandLength(int maxCommandLength) { this.maxCommandLength = maxCommandLength; }
@@ -369,6 +377,24 @@ public class AppConfig {
         public void setAllowlistMode(boolean allowlistMode) { this.allowlistMode = allowlistMode; }
         public List<String> getAllowlist() { return allowlist; }
         public void setAllowlist(List<String> allowlist) { this.allowlist = allowlist; }
+        public boolean isAllowPrivateMcpEndpoints() { return allowPrivateMcpEndpoints; }
+        public void setAllowPrivateMcpEndpoints(boolean allowPrivateMcpEndpoints) { this.allowPrivateMcpEndpoints = allowPrivateMcpEndpoints; }
+    }
+
+    public static class AuthConfig {
+        private boolean enabled = false;
+        private String defaultWorkspace = "default";
+        /** token -> userId:workspaceId; use environment-backed configuration in production. */
+        private Map<String, String> tokens = new LinkedHashMap<>();
+        private List<String> allowedOrigins = new ArrayList<>(List.of("http://localhost:5173", "http://127.0.0.1:5173"));
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getDefaultWorkspace() { return defaultWorkspace; }
+        public void setDefaultWorkspace(String defaultWorkspace) { this.defaultWorkspace = defaultWorkspace; }
+        public Map<String, String> getTokens() { return tokens; }
+        public void setTokens(Map<String, String> tokens) { this.tokens = tokens == null ? new LinkedHashMap<>() : tokens; }
+        public List<String> getAllowedOrigins() { return allowedOrigins; }
+        public void setAllowedOrigins(List<String> allowedOrigins) { this.allowedOrigins = allowedOrigins == null ? new ArrayList<>() : allowedOrigins; }
     }
 
     // ===== Main Getters/Setters =====
@@ -403,6 +429,8 @@ public class AppConfig {
     public void setSecurity(SecurityConfig security) { this.security = security; }
     public GraphConfig getGraph() { return graph; }
     public void setGraph(GraphConfig graph) { this.graph = graph; }
+    public AuthConfig getAuth() { return auth; }
+    public void setAuth(AuthConfig auth) { this.auth = auth; }
 
     // ===== Helper Methods =====
 

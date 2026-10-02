@@ -7,6 +7,7 @@ import com.jianjin.assistant.domain.rag.QueryType;
 import com.jianjin.assistant.domain.rag.Reranker;
 import com.jianjin.assistant.domain.rag.Rewriter;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
+import com.jianjin.assistant.infrastructure.persistence.RagTenantRepository;
 import com.jianjin.assistant.model.Chunk;
 import com.jianjin.assistant.service.graph.ChunkRef;
 import com.jianjin.assistant.service.graph.KGStore;
@@ -15,6 +16,7 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -48,6 +50,7 @@ public class RagService {
     private Function<String, List<Double>> embedFn;
     private Rewriter rewriter;
     private Reranker reranker;
+    private RagTenantRepository tenantRepository;
     private final ExecutorService expansionExecutor;
 
     public RagService(AppConfig cfg, HybridStore store, TextSplitter splitter, InfrastructureService infra) {
@@ -85,6 +88,8 @@ public class RagService {
     public void setRewriter(Rewriter r) { this.rewriter = r; }
     /** 注入精排器；null 等价于关闭 */
     public void setReranker(Reranker r) { this.reranker = r; }
+    @Autowired(required = false)
+    public void setTenantRepository(RagTenantRepository tenantRepository) { this.tenantRepository = tenantRepository; }
 
     public boolean isLoaded() { return loaded; }
     public String getMode() { return store.getMode(); }
@@ -95,8 +100,14 @@ public class RagService {
     }
 
     public Map.Entry<Integer, String> ingest(String doc) {
+        return ingest("default:default", doc);
+    }
+
+    public Map.Entry<Integer, String> ingest(String ownerKey, String doc) {
         List<TextSplitter.ParentChunk> parents = splitter.splitParentChild(doc);
-        HybridStore.IndexResult indexed = store.index(parents, doc);
+        // Include the owner in the hash input so identical files in two workspaces never share ownership.
+        HybridStore.IndexResult indexed = store.index(parents, ownerKey + "\n" + doc);
+        if (tenantRepository != null) tenantRepository.assign(indexed.docHash, ownerKey);
         loaded = true;
         infra.publishEvent("rag.ingest",
                 String.format("{\"chunk_count\":%d,\"mode\":\"%s\",\"doc_hash\":\"%s\"}",
@@ -109,7 +120,15 @@ public class RagService {
     }
 
     public void delete(String docHash) {
+        delete("default:default", docHash);
+    }
+
+    public void delete(String ownerKey, String docHash) {
+        if (tenantRepository != null && !tenantRepository.owns(docHash, ownerKey)) {
+            throw new IllegalArgumentException("document index not found: " + docHash);
+        }
         store.delete(docHash);
+        if (tenantRepository != null) tenantRepository.remove(docHash);
         if (kg != null && kg.available()) kg.deleteDocument(docHash);
         // 重新检测是否还有 chunks
         loaded = !infra.loadAllRAGChunks().isEmpty();
@@ -120,7 +139,12 @@ public class RagService {
     }
 
     public QueryResult queryWithHistory(String question, List<HistoryMessage> history) {
-        QueryTrace trace = traceQueryWithHistory(question, history);
+        QueryTrace trace = traceQueryWithHistory(null, question, history);
+        return new QueryResult(trace.answer, trace.finalContexts);
+    }
+
+    public QueryResult queryWithHistory(String ownerKey, String question, List<HistoryMessage> history) {
+        QueryTrace trace = traceQueryWithHistory(ownerKey, question, history);
         return new QueryResult(trace.answer, trace.finalContexts);
     }
 
@@ -133,6 +157,10 @@ public class RagService {
     }
 
     public QueryTrace traceQueryWithHistory(String question, List<HistoryMessage> history) {
+        return traceQueryWithHistory(null, question, history);
+    }
+
+    private QueryTrace traceQueryWithHistory(String ownerKey, String question, List<HistoryMessage> history) {
         QueryTrace trace = new QueryTrace();
         trace.originalQuestion = question;
         trace.mode = store.getMode();
@@ -150,21 +178,23 @@ public class RagService {
         trace.primaryQuery = primary.text();
 
         // Fetch extra parent contexts only when reranking is enabled.
-        int fetchK = reranker != null ? Math.max(cfg.getRag().getTopK() * 4, 10) : cfg.getRag().getTopK();
-        List<HybridStore.SearchResult> primaryHits = store.search(primary.text(), fetchK);
+        int fetchK = ownerKey == null
+                ? (reranker != null ? Math.max(cfg.getRag().getTopK() * 4, 10) : cfg.getRag().getTopK())
+                : Math.max(100, cfg.getRag().getTopK() * 8);
+        List<HybridStore.SearchResult> primaryHits = filterOwned(ownerKey, store.search(primary.text(), fetchK));
         List<ScoredChunk> results = toScored(primaryHits);
         trace.primaryRetrievalCandidates = copy(results);
         if (shouldExpand(primaryHits) && rewriter != null) {
             List<QuerySpec> variants = rewriter.expand(primary.text(), safeHistory);
             if (variants != null && !variants.isEmpty()) {
                 for (QuerySpec variant : variants) trace.expandedQueries.add(variant.text());
-                results = mergePrimaryAndVariants(primary, primaryHits, variants, fetchK);
+                results = mergePrimaryAndVariants(primary, primaryHits, variants, fetchK, ownerKey);
             }
         }
 
         // unavailable 模式：兜底 TF
         if (results.isEmpty() && "unavailable".equals(store.getMode())) {
-            results = tfSearch(question, cfg.getRag().getTopK());
+            results = filterOwnedScored(ownerKey, tfSearch(question, fetchK));
             trace.fallbackUsed = true;
         }
         if (results.isEmpty()) {
@@ -207,7 +237,21 @@ public class RagService {
         List<HybridStore.SearchResult> primaryHits = store.search(primary.text(), topK);
         List<QuerySpec> variants = new ArrayList<>();
         for (int i = 1; i < queries.size(); i++) variants.add(new QuerySpec(queries.get(i), QueryType.VARIANT));
-        return variants.isEmpty() ? toScored(primaryHits) : mergePrimaryAndVariants(primary, primaryHits, variants, topK);
+        return variants.isEmpty() ? toScored(primaryHits) : mergePrimaryAndVariants(primary, primaryHits, variants, topK, null);
+    }
+
+    private List<HybridStore.SearchResult> filterOwned(String ownerKey, List<HybridStore.SearchResult> results) {
+        if (ownerKey == null || tenantRepository == null || results == null || results.isEmpty()) return results;
+        Set<Long> allowed = tenantRepository.allowedContexts(ownerKey,
+                results.stream().map(item -> item.contextId).toList());
+        return results.stream().filter(item -> allowed.contains(item.contextId)).toList();
+    }
+
+    private List<ScoredChunk> filterOwnedScored(String ownerKey, List<ScoredChunk> results) {
+        if (ownerKey == null || tenantRepository == null || results == null || results.isEmpty()) return results;
+        Set<Long> allowed = tenantRepository.allowedContexts(ownerKey,
+                results.stream().map(item -> item.contextId).toList());
+        return results.stream().filter(item -> allowed.contains(item.contextId)).toList();
     }
 
     private boolean shouldExpand(List<HybridStore.SearchResult> primaryHits) {
@@ -220,14 +264,15 @@ public class RagService {
     private List<ScoredChunk> mergePrimaryAndVariants(QuerySpec primary,
                                                        List<HybridStore.SearchResult> primaryHits,
                                                        List<QuerySpec> variants,
-                                                       int topK) {
+                                                       int topK,
+                                                       String ownerKey) {
         List<QueryHits> all = new ArrayList<>();
         all.add(new QueryHits(primary, primaryHits));
         List<CompletableFuture<QueryHits>> futures = new ArrayList<>();
         for (QuerySpec variant : variants) {
             futures.add(CompletableFuture.supplyAsync(() -> {
                 try {
-                    return new QueryHits(variant, store.search(variant.text(), topK));
+                    return new QueryHits(variant, filterOwned(ownerKey, store.search(variant.text(), topK)));
                 } catch (Exception e) {
                     log.warn("Expanded query search failed; skipping variant: {}", e.getMessage());
                     return new QueryHits(variant, Collections.emptyList());

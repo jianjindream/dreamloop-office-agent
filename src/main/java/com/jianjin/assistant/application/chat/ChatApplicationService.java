@@ -6,6 +6,7 @@ import com.jianjin.assistant.service.agent.UnifiedAgentService;
 import org.springframework.stereotype.Service;
 
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class ChatApplicationService {
@@ -21,6 +22,10 @@ public class ChatApplicationService {
         return agent.processWithOptions(req.getMessage(), req);
     }
 
+    public ChatResponse process(ChatRequest req, AtomicBoolean cancelled) {
+        return agent.processWithOptions(req.getMessage(), req, cancelled);
+    }
+
     /**
      * 流式对话入口。每完成一个语义事件（start / mode / step / tool_call /
      * observation / rag_result / done）就回调一次 onEvent。
@@ -31,9 +36,8 @@ public class ChatApplicationService {
         return agent.processStream(req.getMessage(), req, onEvent);
     }
 
-    /** 取消所有 in-flight 请求 */
-    public void cancel() {
-        agent.cancel();
+    public ChatResponse processStream(ChatRequest req, AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
+        return agent.processStream(req.getMessage(), req, cancelled, onEvent);
     }
 
     /** 暴露内部引擎，仅供需要直接访问 RAG/工具/记忆的接口层用例（status / upload）。 */

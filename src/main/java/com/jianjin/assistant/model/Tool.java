@@ -9,6 +9,7 @@ public class Tool {
     private String description;
     private List<ToolParam> parameters;
     private boolean mcp;
+    private String endpoint;
     private transient Function<Map<String, Object>, String> execute;
 
     public Tool() {}
@@ -24,6 +25,8 @@ public class Tool {
     public void setParameters(List<ToolParam> parameters) { this.parameters = parameters; }
     public boolean isMcp() { return mcp; }
     public void setMcp(boolean mcp) { this.mcp = mcp; }
+    public String getEndpoint() { return endpoint; }
+    public void setEndpoint(String endpoint) { this.endpoint = endpoint; }
     public Function<Map<String, Object>, String> getExecute() { return execute; }
     public void setExecute(Function<Map<String, Object>, String> execute) { this.execute = execute; }
 }

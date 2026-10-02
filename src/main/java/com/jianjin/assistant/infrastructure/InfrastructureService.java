@@ -253,6 +253,20 @@ public class InfrastructureService {
         chatHistoryRepo.deleteThrough(userId, sessionId, throughId);
     }
 
+    public List<ChatHistoryRepository.SessionRow> listChatSessions(String userId) {
+        return chatHistoryRepo.listSessions(userId);
+    }
+
+    public boolean renameChatSession(String userId, String sessionId, String title) {
+        return chatHistoryRepo.renameSession(userId, sessionId, title);
+    }
+
+    public boolean deleteChatSession(String userId, String sessionId) {
+        boolean deleted = chatHistoryRepo.deleteSession(userId, sessionId);
+        if (deleted) sessionSummaryRepo.delete(userId, sessionId);
+        return deleted;
+    }
+
     public SessionSummary loadSessionSummary(String userId, String sessionId) {
         return sessionSummaryRepo.load(userId, sessionId);
     }

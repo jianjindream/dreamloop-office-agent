@@ -90,7 +90,6 @@ public class UnifiedAgentService {
     private final InfrastructureService infra;
 
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
-    private final AtomicBoolean cancelled = new AtomicBoolean(false);
 
     /** 知识图谱（RAG 三路融合 + 记忆图共享） */
     private KGStore kg;
@@ -245,14 +244,23 @@ public class UnifiedAgentService {
     }
 
     public ChatResponse processWithOptions(String query, ChatRequest req) {
-        return processInternal(query, req, e -> {});
+        return processInternal(query, req, new AtomicBoolean(false), e -> {});
+    }
+
+    public ChatResponse processWithOptions(String query, ChatRequest req, AtomicBoolean cancelled) {
+        return processInternal(query, req, cancelled == null ? new AtomicBoolean(false) : cancelled, e -> {});
     }
 
     public ChatResponse processStream(String query, ChatRequest req, Consumer<StreamEvent> onEvent) {
-        return processInternal(query, req, onEvent == null ? e -> {} : onEvent);
+        return processInternal(query, req, new AtomicBoolean(false), onEvent == null ? e -> {} : onEvent);
     }
 
-    private ChatResponse processInternal(String query, ChatRequest req, Consumer<StreamEvent> onEvent) {
+    public ChatResponse processStream(String query, ChatRequest req, AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
+        return processInternal(query, req, cancelled == null ? new AtomicBoolean(false) : cancelled,
+                onEvent == null ? e -> {} : onEvent);
+    }
+
+    private ChatResponse processInternal(String query, ChatRequest req, AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
         MemoryScope scope = MemoryScope.from(req.getUserId(), req.getSessionId());
         UserMemorySpace space = memorySpaces.user(scope.userId());
         SessionMemoryState session = memorySpaces.session(scope);
@@ -262,7 +270,6 @@ public class UnifiedAgentService {
         PreferenceMemory pref = space.preferences();
         LongTermMemory ltm = space.longTerm();
         GraphMemory graphMem = space.graph();
-        cancelled.set(false);
         ChatResponse resp = new ChatResponse();
         resp.setQuery(query);
         resp.setMode("chat");
@@ -296,9 +303,10 @@ public class UnifiedAgentService {
         // 模式决策
         String mode = ChatRouter.decideMode(query, req.isExplicit(), req.isUseRag(),
                 req.getSelectedTools(), rag.isLoaded());
-        Map<String, Tool> toolset = tools;
+        Map<String, Tool> toolset = req.getAllowedToolKeys() == null ? tools : filterTools(req.getAllowedToolKeys());
         if (req.isExplicit() && req.getSelectedTools() != null && !req.getSelectedTools().isEmpty()) {
-            Map<String, Tool> filtered = filterTools(req.getSelectedTools());
+            Map<String, Tool> filtered = new java.util.HashMap<>();
+            for (String name : req.getSelectedTools()) if (toolset.containsKey(name)) filtered.put(name, toolset.get(name));
             if (!filtered.isEmpty()) {
                 toolset = filtered;
             } else {
@@ -315,7 +323,7 @@ public class UnifiedAgentService {
             case "react" -> reactLoop.runStream(resp, query, toolset, memPrefix, histMsgs, cancelled, onEvent);
             case "tool" -> new ToolModeHandler(llm, toolService, pref).run(resp, query, toolset, memPrefix, histMsgs);
             case "rag" -> {
-                RagService.QueryResult qr = rag.queryWithHistory(query, toRagHistory(histMsgs, query));
+                RagService.QueryResult qr = rag.queryWithHistory(scope.userId(), query, toRagHistory(histMsgs, query));
                 resp.setAnswer(qr.answer);
                 resp.setSearchResults(toSearchResults(qr.results));
                 onEvent.accept(StreamEvent.ragResult(resp.getSearchResults()));
@@ -363,9 +371,12 @@ public class UnifiedAgentService {
         }
     }
 
-    public void cancel() { cancelled.set(true); }
-
     public void registerTool(Tool tool) { tools.put(tool.getName(), tool); }
+
+    public void registerTool(String registryName, Tool tool) { tools.put(registryName, tool); }
+
+    public Tool removeTool(String name) { return tools.remove(name); }
+    public void removeSession(String userId, String sessionId) { memorySpaces.removeSession(MemoryScope.from(userId, sessionId)); }
 
     // ===== Accessors =====
     public Map<String, Tool> getTools() { return tools; }

@@ -7,6 +7,15 @@ services:
       - "8090:8090"
     environment:
       - TZ=Asia/Shanghai
+      # 从宿主机环境变量传入百炼凭据；请勿将真实 Key 写入此文件。
+      - APP_LLM_API_KEY=${APP_LLM_API_KEY:-}
+      - APP_LLM_API_URL=${APP_LLM_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions}
+      - APP_LLM_MODEL=${APP_LLM_MODEL:-qwen-plus}
+      - APP_EMBEDDING_API_KEY=${APP_EMBEDDING_API_KEY:-}
+      - APP_EMBEDDING_API_URL=${APP_EMBEDDING_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings}
+      - APP_EMBEDDING_MODEL=${APP_EMBEDDING_MODEL:-text-embedding-v4}
+      - APP_EMBEDDING_DIMENSIONS=${APP_EMBEDDING_DIMENSIONS:-1024}
+      - APP_RAG_RAG_MILVUS_DIM=${APP_RAG_RAG_MILVUS_DIM:-1024}
       # 通过环境变量覆盖容器内地址（容器之间用服务名互连）
       - APP_MILVUS_HOST=milvus
       - APP_MILVUS_PORT=19530

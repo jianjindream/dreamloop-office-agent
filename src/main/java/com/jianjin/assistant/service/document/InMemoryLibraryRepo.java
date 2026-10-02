@@ -132,6 +132,29 @@ public class InMemoryLibraryRepo implements LibraryRepo {
         }
     }
 
+    @Override
+    public boolean delete(String documentId) {
+        if (documentId == null || documentId.isBlank()) throw new IllegalArgumentException("document_id is required");
+        synchronized (mu) {
+            Document removed = docs.remove(documentId);
+            List<DocumentVersion> removedVersions = versions.remove(documentId);
+            if (removedVersions != null) removedVersions.forEach(version -> versionIndex.remove(version.getId()));
+            return removed != null;
+        }
+    }
+
+    @Override
+    public void putLatestMetadata(String documentId, String key, Object value) {
+        synchronized (mu) {
+            Document document = docs.get(documentId);
+            if (document == null) throw new IllegalArgumentException("document not found: " + documentId);
+            DocumentVersion version = versionIndex.get(document.getLatestVersionId());
+            if (version == null) throw new IllegalStateException("latest version missing for " + documentId);
+            Map<String,Object> metadata = new LinkedHashMap<>(version.getMetadata());
+            metadata.put(key, value); version.setMetadata(metadata);
+        }
+    }
+
     // ─────────────────────────── 浅拷贝（避免外部修改内部状态） ───────────────────────────
 
     private static Document copyOf(Document d) {

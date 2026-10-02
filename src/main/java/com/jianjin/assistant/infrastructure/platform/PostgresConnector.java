@@ -58,6 +58,11 @@ public class PostgresConnector {
                 "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'default'",
                 "CREATE INDEX IF NOT EXISTS idx_chat_history_scope ON chat_history(user_id, session_id, id)",
                 """
+                CREATE TABLE IF NOT EXISTS chat_sessions (
+                    user_id TEXT NOT NULL, session_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '新对话',
+                    created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (user_id, session_id))""",
+                """
                 CREATE TABLE IF NOT EXISTS session_summaries (
                     user_id TEXT NOT NULL, session_id TEXT NOT NULL, summary JSONB NOT NULL,
                     summarized_through_id BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW(),
@@ -84,6 +89,11 @@ public class PostgresConnector {
                     UNIQUE(doc_hash, chunk_idx))""",
                 "ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS parent_id BIGINT",
                 "CREATE INDEX IF NOT EXISTS idx_rag_chunks_parent_id ON rag_chunks(parent_id)",
+                """
+                CREATE TABLE IF NOT EXISTS rag_documents (
+                    doc_hash TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())""",
+                "CREATE INDEX IF NOT EXISTS idx_rag_documents_owner ON rag_documents(owner_key, doc_hash)",
                 """
                 CREATE TABLE IF NOT EXISTS rag_eval_datasets (
                     id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL,

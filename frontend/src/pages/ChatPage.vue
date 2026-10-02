@@ -31,6 +31,7 @@ const workspace = useWorkspaceStore()
 const prompt = ref('')
 const isStreaming = ref(false)
 const activeMessageId = ref('')
+const activeTaskId = ref('')
 const abortController = ref<AbortController | null>(null)
 const messageList = ref<HTMLElement | null>(null)
 const promptInput = ref<HTMLTextAreaElement | null>(null)
@@ -85,6 +86,7 @@ const updateRunningEvents = (message: ChatMessage) => {
 
 const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
   const data = event.data as Record<string, unknown>
+  if (typeof data.task_id === 'string') activeTaskId.value = data.task_id
   const assistant = chat.currentSession?.messages.find((item) => item.id === messageId)
   if (!assistant) return
 
@@ -197,6 +199,7 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
     chat.persist()
     isStreaming.value = false
     activeMessageId.value = ''
+    activeTaskId.value = ''
     abortController.value = null
     scrollToBottom()
   }
@@ -217,9 +220,10 @@ const toDocument = (messageId: string) => {
 
 const stopGeneration = async () => {
   if (!isStreaming.value) return
+  const taskId = activeTaskId.value
+  if (taskId) await agentApi.cancel(taskId).catch(() => undefined)
   abortController.value?.abort()
   if (activeMessageId.value) chat.updateMessage(activeMessageId.value, { status: 'stopped' })
-  await agentApi.cancel().catch(() => undefined)
 }
 
 const retryMessage = (messageId: string) => {

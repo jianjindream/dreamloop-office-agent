@@ -27,6 +27,8 @@ public class MemorySpaceManager {
         return sessions.computeIfAbsent(scope, this::loadSession);
     }
 
+    public void removeSession(MemoryScope scope) { sessions.remove(scope); }
+
     public void setKnowledgeGraph(KGStore graphStore) {
         this.kg = graphStore;
         users.forEach((id, space) -> {

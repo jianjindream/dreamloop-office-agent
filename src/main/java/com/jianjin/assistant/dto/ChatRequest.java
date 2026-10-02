@@ -2,6 +2,7 @@ package com.jianjin.assistant.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 
 public class ChatRequest {
     private String message;
@@ -14,6 +15,8 @@ public class ChatRequest {
     private String userId;
     @JsonProperty("session_id")
     private String sessionId;
+    @JsonIgnore
+    private List<String> allowedToolKeys;
 
     public String getMessage() { return message; }
     public void setMessage(String message) { this.message = message; }
@@ -27,4 +30,6 @@ public class ChatRequest {
     public void setUserId(String userId) { this.userId = userId; }
     public String getSessionId() { return sessionId; }
     public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    public List<String> getAllowedToolKeys() { return allowedToolKeys; }
+    public void setAllowedToolKeys(List<String> allowedToolKeys) { this.allowedToolKeys = allowedToolKeys; }
 }

@@ -39,4 +39,12 @@ public class SessionSummaryRepository {
             ps.setLong(4, summary.summarizedThroughId); ps.executeUpdate();
         } catch (Exception ignored) { }
     }
+
+    public synchronized void delete(String userId, String sessionId) {
+        Connection c = pg.connection();
+        if (c == null) return;
+        try (PreparedStatement ps = c.prepareStatement("DELETE FROM session_summaries WHERE user_id=? AND session_id=?")) {
+            ps.setString(1,userId); ps.setString(2,sessionId); ps.executeUpdate();
+        } catch (Exception ignored) { }
+    }
 }

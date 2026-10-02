@@ -55,6 +55,7 @@ export interface DocumentWriteResult extends DocumentDetail {
 }
 
 export interface UploadResult {
+  upload_id?: string
   filename?: string
   content_type?: string
   parser?: string
@@ -80,6 +81,21 @@ export interface ApiOperationResult {
   name?: string
   message?: string
   error?: string
+}
+
+export interface ServerSession {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+  message_count: number
+}
+
+export interface ServerMessage {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
 }
 
 export interface SystemStatus {
@@ -145,6 +161,7 @@ export interface SearchResult {
 }
 
 export interface ChatResponse {
+  task_id?: string
   query?: string
   answer?: string
   mode?: string

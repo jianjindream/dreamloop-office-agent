@@ -1,5 +1,5 @@
 import { fetchEventSource, type EventSourceMessage } from '@microsoft/fetch-event-source'
-import { API_BASE_URL, ApiError, request } from './http'
+import { API_BASE_URL, ApiError, identityHeaders, request } from './http'
 import type {
   ApiOperationResult,
   ChatRequest,
@@ -15,6 +15,8 @@ import type {
   SystemStatus,
   ToolSummary,
   UploadResult,
+  ServerSession,
+  ServerMessage,
 } from '@/types/api'
 
 interface StreamOptions {
@@ -44,31 +46,42 @@ export const uploadFileWithProgress = (
   onProgress: (percent: number) => void,
 ): Promise<UploadResult> =>
   new Promise((resolve, reject) => {
-    const request = new XMLHttpRequest()
+    const xhr = new XMLHttpRequest()
     const form = new FormData()
+    const uploadId = `upload_${crypto.randomUUID().replaceAll('-', '')}`
     form.append('file', file)
+    form.append('upload_id', uploadId)
 
-    request.open('POST', `${API_BASE_URL}/api/upload/file`)
-    request.responseType = 'json'
-    request.upload.onprogress = (event) => {
+    const progressTimer = window.setInterval(() => {
+      request<{ percent: number }>(`/api/uploads/${encodeURIComponent(uploadId)}/progress`)
+        .then((progress) => onProgress(progress.percent))
+        .catch(() => undefined)
+    }, 400)
+    const stopPolling = () => window.clearInterval(progressTimer)
+
+    xhr.open('POST', `${API_BASE_URL}/api/upload/file`)
+    Object.entries(identityHeaders).forEach(([name, value]) => xhr.setRequestHeader(name, value))
+    xhr.responseType = 'json'
+    xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100))
     }
-    request.onerror = () => reject(new ApiError('文件上传失败，请检查网络连接', 0))
-    request.onabort = () => reject(new ApiError('文件上传已取消', 0))
-    request.onload = () => {
-      const payload = (request.response ?? {}) as UploadResult
-      if (request.status < 200 || request.status >= 300) {
-        reject(new ApiError(payload.error || `文件上传失败（${request.status}）`, request.status, payload))
+    xhr.onerror = () => { stopPolling(); reject(new ApiError('文件上传失败，请检查网络连接', 0)) }
+    xhr.onabort = () => { stopPolling(); reject(new ApiError('文件上传已取消', 0)) }
+    xhr.onload = () => {
+      stopPolling()
+      const payload = (xhr.response ?? {}) as UploadResult
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(payload.error || `文件上传失败（${xhr.status}）`, xhr.status, payload))
         return
       }
       if (payload.error) {
-        reject(new ApiError(payload.error, request.status, payload))
+        reject(new ApiError(payload.error, xhr.status, payload))
         return
       }
       onProgress(100)
       resolve(payload)
     }
-    request.send(form)
+    xhr.send(form)
   })
 
 export const agentApi = {
@@ -84,12 +97,27 @@ export const agentApi = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+  deleteDocument: (id: string | number) =>
+    request<ApiOperationResult>(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  sessions: () => request<ServerSession[]>('/api/sessions'),
+  sessionMessages: (id: string, afterId = 0) =>
+    request<ServerMessage[]>(`/api/sessions/${encodeURIComponent(id)}/messages?after_id=${afterId}`),
+  renameSession: (id: string, title: string) =>
+    request<ApiOperationResult>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  deleteSession: (id: string) =>
+    request<ApiOperationResult>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   snapshots: () => request<SnapshotSummary[]>('/api/snapshots'),
   registerMcp: (payload: McpRegistration) =>
     request<ApiOperationResult>('/api/tools/mcp', {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then(assertOperation),
+  updateMcp: (name: string, payload: McpRegistration) =>
+    request<ApiOperationResult>(`/api/tools/mcp/${encodeURIComponent(name)}`, {
+      method: 'PUT', body: JSON.stringify(payload),
+    }).then(assertOperation),
+  deleteMcp: (name: string) =>
+    request<ApiOperationResult>(`/api/tools/mcp/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(assertOperation),
   removeRagIndex: (docHash: string) =>
     request<ApiOperationResult>('/api/docs/delete', {
       method: 'POST',
@@ -106,6 +134,7 @@ export const agentApi = {
       headers: {
         Accept: 'text/event-stream',
         'Content-Type': 'application/json',
+        ...identityHeaders,
       },
       body: JSON.stringify(payload),
       signal: options.signal,
@@ -136,5 +165,5 @@ export const agentApi = {
     form.append('file', file)
     return request<UploadResult>('/api/upload/file', { method: 'POST', body: form }).then(assertOperation)
   },
-  cancel: () => request<{ ok: boolean; message: string }>('/api/chat/cancel', { method: 'POST' }),
+  cancel: (taskId: string) => request<{ ok: boolean; message: string }>(`/api/chat/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),
 }

@@ -9,6 +9,9 @@ import com.jianjin.assistant.service.agent.UnifiedAgentService;
 import com.jianjin.assistant.service.document.DocumentLibraryService;
 import com.jianjin.assistant.service.document.DocumentParser;
 import com.jianjin.assistant.service.document.InMemoryLibraryRepo;
+import com.jianjin.assistant.service.document.UploadProgressService;
+import com.jianjin.assistant.application.chat.ChatTaskRegistry;
+import com.jianjin.assistant.interfaces.http.error.GlobalApiExceptionHandler;
 import com.jianjin.assistant.service.rag.RagService;
 import com.jianjin.assistant.service.tools.ToolService;
 import org.junit.jupiter.api.Test;
@@ -19,6 +22,7 @@ import org.springframework.http.converter.json.MappingJackson2HttpMessageConvert
 
 import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -34,8 +38,11 @@ class DocumentControllerTest {
             mock(AppConfig.class),
             mock(ToolService.class),
             mock(DocumentParser.class),
-            new DocumentLibraryService(new InMemoryLibraryRepo(), mock(RagService.class))
-    )).setMessageConverters(new MappingJackson2HttpMessageConverter()).build();
+            new DocumentLibraryService(new InMemoryLibraryRepo(), mock(RagService.class)),
+            new ChatTaskRegistry(),
+            new UploadProgressService()
+    )).setControllerAdvice(new GlobalApiExceptionHandler())
+            .setMessageConverters(new MappingJackson2HttpMessageConverter()).build();
 
     @Test
     void createUpdateAndReadVersions() throws Exception {
@@ -66,11 +73,22 @@ class DocumentControllerTest {
     }
 
     @Test
-    void updatingUnknownDocumentReturnsBadRequest() throws Exception {
+    void updatingUnknownDocumentReturnsNotFound() throws Exception {
         mvc.perform(put("/api/documents/missing")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"无效\",\"content_md\":\"正文\"}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").exists());
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("DOCUMENT_NOT_FOUND"));
+    }
+
+    @Test
+    void deletesDocumentById() throws Exception {
+        String createdJson = mvc.perform(post("/api/documents")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"临时文档\",\"content_md\":\"正文\"}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        String id = mapper.readTree(createdJson).path("document").path("id").asText();
+        mvc.perform(delete("/api/documents/{id}", id)).andExpect(status().isOk());
+        mvc.perform(get("/api/documents/{id}", id)).andExpect(status().isNotFound());
     }
 }

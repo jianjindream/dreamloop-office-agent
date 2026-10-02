@@ -1,5 +1,6 @@
 # Build output
 target/
+.m2-repository/
 frontend/node_modules/
 frontend/dist/
 frontend/coverage/

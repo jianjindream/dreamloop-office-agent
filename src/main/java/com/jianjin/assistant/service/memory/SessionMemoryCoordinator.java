@@ -111,9 +111,9 @@ public class SessionMemoryCoordinator {
         long throughId = plan.evicted().get(plan.evicted().size() - 1).getId();
         if (throughId > 0) merged.summarizedThroughId = throughId;
         trimSummary(merged, cfg.getMemory().getSummaryMaxTokens());
-        // Persist the cursor before deleting raw rows: a failed delete cannot cause duplicate prompt context.
+        // Keep raw rows as immutable product history. The cursor prevents summarized rows from being
+        // loaded into the prompt again while the session/message API can still return the full transcript.
         infra.saveSessionSummary(scope.userId(), scope.sessionId(), merged);
-        if (throughId > 0) infra.deleteChatHistoryThrough(scope.userId(), scope.sessionId(), throughId);
         state.messages().removeOldest(plan.evicted().size());
         state.setSummary(merged);
     }

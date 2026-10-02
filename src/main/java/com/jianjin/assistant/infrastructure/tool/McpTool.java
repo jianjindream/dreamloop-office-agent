@@ -37,6 +37,7 @@ public final class McpTool {
             }
         });
         tool.setMcp(true);
+        tool.setEndpoint(endpoint);
         return tool;
     }
 }

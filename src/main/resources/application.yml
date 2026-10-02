@@ -9,14 +9,18 @@ spring:
 
 app:
   llm:
-    api-url: https://ark.cn-beijing.volces.com/api/v3/chat/completions
-    api-key: ""
-    model: deepseek-v4-flash-260425
+    # 阿里云百炼 OpenAI 兼容接口（华北 2/北京）。
+    # Token Plan 或其他地域的 Key 必须改用百炼控制台显示的配套 API Host。
+    api-url: "${APP_LLM_API_URL:https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions}"
+    api-key: "${APP_LLM_API_KEY:}"
+    model: "${APP_LLM_MODEL:qwen-plus}"
     temperature: 0.7
   embedding:
-    api-url: https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal
-    api-key: ""
-    model: doubao-embedding-vision-250615
+    api-url: "${APP_EMBEDDING_API_URL:https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings}"
+    api-key: "${APP_EMBEDDING_API_KEY:}"
+    model: "${APP_EMBEDDING_MODEL:text-embedding-v4}"
+    # text-embedding-v4 支持自定义维度；必须与 rag-milvus-dim 保持一致。
+    dimensions: "${APP_EMBEDDING_DIMENSIONS:1024}"
   milvus:
     host: localhost
     port: 19530
@@ -45,7 +49,8 @@ app:
     semantic-weight: 0.7
     keyword-weight: 1.0
     enable-hybrid-search: true
-    rag-milvus-dim: 2048
+    # 与阿里云 text-embedding-v4 的默认输出维度保持一致。
+    rag-milvus-dim: "${APP_RAG_RAG_MILVUS_DIM:1024}"
     # 先检索主 query；仅在结果不足或缺少跨路共识时扩展最多 num-queries 条。
     rewrite:
       enabled: true
@@ -108,6 +113,7 @@ app:
   security:
     max-command-length: 500
     allowlist-mode: false
+    allow-private-mcp-endpoints: false
     allowlist:
       - "ls"
       - "cat"
@@ -118,3 +124,13 @@ app:
       - "node"
       - "go"
       - "java"
+
+  # 生产环境开启后，所有 /api/* 请求必须携带 Bearer token。
+  # tokens 的值格式为 userId:workspaceId；请仅通过外部配置注入真实 token。
+  auth:
+    enabled: false
+    default-workspace: default
+    tokens: {}
+    allowed-origins:
+      - http://localhost:5173
+      - http://127.0.0.1:5173

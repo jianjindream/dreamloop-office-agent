@@ -45,7 +45,7 @@ flowchart LR
 | --- | --- |
 | 后端 | Java 17、Spring Boot 3.2、Maven |
 | 前端 | Vue 3、TypeScript、Vite、Pinia |
-| 模型接口 | 火山引擎 Ark 兼容的 Chat Completions 与 Embeddings API |
+| 模型接口 | 阿里云百炼 OpenAI 兼容的 Chat Completions 与 Embeddings API |
 | 数据持久化 | PostgreSQL 16 |
 | 检索 | Milvus、Elasticsearch、Neo4j、加权 RRF |
 | 事件 | Kafka（KRaft） |
@@ -77,13 +77,15 @@ curl http://localhost:8090/api/status
 
 ### 2. 接入真实模型
 
-项目默认使用火山引擎 Ark 地址。推荐通过环境变量传入密钥，不要把密钥提交到仓库。
+项目默认使用阿里云百炼（DashScope）华北 2（北京）的 OpenAI 兼容接口。推荐通过环境变量传入密钥，不要把密钥提交到仓库。
+
+请在百炼控制台创建 API Key。普通按量付费 Key 使用默认地址；Token Plan、试用 Key 或其他地域的 Key，必须将下方两个 API URL 替换为控制台展示的配套 API Host 再追加接口路径，否则会返回认证错误。
 
 PowerShell：
 
 ```powershell
-$env:APP_LLM_API_KEY = "your-ark-api-key"
-$env:APP_EMBEDDING_API_KEY = "your-ark-api-key"
+$env:APP_LLM_API_KEY = "your-bailian-api-key"
+$env:APP_EMBEDDING_API_KEY = "your-bailian-api-key"
 $env:TAVILY_API_KEY = "your-tavily-api-key" # 可选
 mvn spring-boot:run
 ```
@@ -91,20 +93,24 @@ mvn spring-boot:run
 Bash：
 
 ```bash
-export APP_LLM_API_KEY="your-ark-api-key"
-export APP_EMBEDDING_API_KEY="your-ark-api-key"
+export APP_LLM_API_KEY="your-bailian-api-key"
+export APP_EMBEDDING_API_KEY="your-bailian-api-key"
 export TAVILY_API_KEY="your-tavily-api-key" # 可选
 mvn spring-boot:run
 ```
 
-如需使用其他兼容服务，可同时覆盖：
+如需使用其他百炼地域、Token Plan 或其他兼容服务，可同时覆盖：
 
 ```text
 APP_LLM_API_URL
 APP_LLM_MODEL
 APP_EMBEDDING_API_URL
 APP_EMBEDDING_MODEL
+APP_EMBEDDING_DIMENSIONS
+APP_RAG_RAG_MILVUS_DIM
 ```
+
+默认聊天地址为 `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`，默认 Embedding 地址为 `https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings`。默认 Embedding 模型为 `text-embedding-v4`，并显式请求 `1024` 维向量；`APP_EMBEDDING_DIMENSIONS` 和 `APP_RAG_RAG_MILVUS_DIM` 必须设置为同一个值。
 
 只配置 LLM Key 时可以真实对话；未配置 Embedding Key 时，向量相关能力会回退到非向量或内存路径。
 
@@ -134,8 +140,9 @@ docker compose up -d --build
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `server.port` | `8090` | HTTP 服务端口 |
-| `app.llm.api-key` | 空 | 为空时使用 Mock LLM |
-| `app.embedding.api-key` | 空 | 为空时不调用真实 Embedding API |
+| `app.llm.api-key` | 空 | 百炼 API Key；为空时使用 Mock LLM |
+| `app.embedding.api-key` | 空 | 百炼 API Key；为空时不调用真实 Embedding API |
+| `app.embedding.dimensions` | `1024` | 请求的 Embedding 输出维度，须与 Milvus 维度一致 |
 | `app.rag.top-k` | `3` | 最终检索结果数量 |
 | `app.rag.enable-hybrid-search` | `true` | 是否启用混合检索 |
 | `app.rag.rewrite.enabled` | `true` | 是否启用查询改写 |
@@ -299,6 +306,8 @@ src/main/resources/
 ```
 
 ## 构建与测试
+
+产品化接口（服务端会话、任务级取消、SSE 契约、文档删除、上传进度、MCP 管理、认证与错误码）见 [后端接口说明](docs/backend-api.md)。
 
 运行全部测试：
 

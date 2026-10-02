@@ -97,6 +97,9 @@ public class LlmService {
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", cfg.getEmbedding().getModel());
+        if (cfg.getEmbedding().getDimensions() > 0) {
+            body.put("dimensions", cfg.getEmbedding().getDimensions());
+        }
         if (isMultimodal) {
             body.put("input", List.of(Map.of("type", "text", "text", text)));
         } else {

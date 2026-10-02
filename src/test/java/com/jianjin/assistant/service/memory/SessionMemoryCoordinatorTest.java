@@ -28,6 +28,6 @@ class SessionMemoryCoordinatorTest {
         assertEquals(2, stm.size());
         assertFalse(state.summary().contextNotes.isEmpty());
         verify(infra).saveSessionSummary(eq("u1"), eq("s1"), any(SessionSummary.class));
-        verify(infra).deleteChatHistoryThrough("u1", "s1", 2L);
+        verify(infra, never()).deleteChatHistoryThrough(anyString(), anyString(), anyLong());
     }
 }

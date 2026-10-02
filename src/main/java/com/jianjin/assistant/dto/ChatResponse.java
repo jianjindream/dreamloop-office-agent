@@ -8,6 +8,8 @@ import java.util.Map;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class ChatResponse {
+    @JsonProperty("task_id")
+    private String taskId;
     private String query;
     private String answer;
     private String mode;
@@ -27,6 +29,8 @@ public class ChatResponse {
     private Boolean interrupted;
 
     // getters/setters
+    public String getTaskId() { return taskId; }
+    public void setTaskId(String taskId) { this.taskId = taskId; }
     public String getQuery() { return query; }
     public void setQuery(String query) { this.query = query; }
     public String getAnswer() { return answer; }
