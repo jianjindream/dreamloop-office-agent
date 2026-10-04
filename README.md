@@ -1,6 +1,6 @@
-# Office Agent
+# Dreamloop 办公智能体
 
-一个基于 Java 17 与 Spring Boot 3 的办公智能体项目。它把多轮对话、RAG 知识库、四层记忆、工具调用、ReAct 多步执行、知识图谱和评测整合到同一个 Web 应用中，并提供开箱即用的单页界面与 HTTP API。
+Dreamloop 是一个基于 Java 21 与 Spring Boot 3 的办公智能体项目。它把多轮对话、RAG 知识库、四层记忆、工具调用、ReAct 多步执行、知识图谱和评测整合到同一个 Web 应用中，并提供开箱即用的单页界面与 HTTP API。
 
 ## 主要能力
 
@@ -43,7 +43,7 @@ flowchart LR
 
 | 类别 | 技术 |
 | --- | --- |
-| 后端 | Java 17、Spring Boot 3.2、Maven |
+| 后端 | Java 21、Spring Boot 3.2、Maven |
 | 前端 | Vue 3、TypeScript、Vite、Pinia |
 | 模型接口 | 阿里云百炼 OpenAI 兼容的 Chat Completions 与 Embeddings API |
 | 数据持久化 | PostgreSQL 16 |
@@ -56,7 +56,7 @@ flowchart LR
 
 ### 环境要求
 
-- JDK 17
+- JDK 21
 - Maven 3.8+
 - Node.js 22（本地开发 Vue 前端时）
 - Docker Desktop 或 Docker Engine（仅完整基础设施、容器部署和 Docker 沙箱需要）
