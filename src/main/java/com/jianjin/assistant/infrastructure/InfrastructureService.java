@@ -1,8 +1,8 @@
 package com.jianjin.assistant.infrastructure;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch._types.Refresh;
-import co.elastic.clients.elasticsearch._types.query_dsl.MatchQuery;
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch.core.IndexRequest;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
@@ -21,11 +21,11 @@ import com.jianjin.assistant.infrastructure.platform.Neo4jConnector;
 import com.jianjin.assistant.infrastructure.platform.PostgresConnector;
 import io.milvus.client.MilvusClient;
 import io.milvus.grpc.SearchResults;
-import io.milvus.param.MetricType;
 import io.milvus.param.R;
 import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
 import io.milvus.param.dml.SearchParam;
+import io.milvus.param.dml.UpsertParam;
 import io.milvus.response.SearchResultsWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +36,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import com.jianjin.assistant.service.memory.SessionSummary;
 
 /**
@@ -171,14 +172,15 @@ public class InfrastructureService {
     }
 
     public static class ChunkRow {
-        public long id; public String content;
+        public long id; public String docHash; public int chunkIdx; public String content; public String embeddingJson;
     }
 
     public List<ChunkRow> loadAllRAGChunks() {
         List<ChunkRow> out = new ArrayList<>();
         for (RagChunkRepository.Row r : ragChunkRepo.loadAll()) {
             ChunkRow row = new ChunkRow();
-            row.id = r.id; row.content = r.content;
+            row.id = r.id; row.docHash = r.docHash; row.chunkIdx = r.chunkIdx;
+            row.content = r.content; row.embeddingJson = r.embeddingJson;
             out.add(row);
         }
         return out;
@@ -188,7 +190,8 @@ public class InfrastructureService {
         List<ChunkRow> out = new ArrayList<>();
         for (RagChunkRepository.Row r : ragChunkRepo.loadByIds(ids)) {
             ChunkRow row = new ChunkRow();
-            row.id = r.id; row.content = r.content;
+            row.id = r.id; row.docHash = r.docHash; row.chunkIdx = r.chunkIdx;
+            row.content = r.content; row.embeddingJson = r.embeddingJson;
             out.add(row);
         }
         return out;
@@ -290,29 +293,72 @@ public class InfrastructureService {
     // ================= RAG Infrastructure =================
 
     public void initRAGInfra(int dim) {
+        boolean rebuildMilvus = false;
+        boolean rebuildEs = false;
         if (milvusConn.available()) {
-            try { milvusConn.ensureRAGCollection(dim); }
+            try { rebuildMilvus = milvusConn.ensureRAGCollection(dim); }
             catch (Exception e) { log.warn("Milvus rag_chunks 初始化失败: {}", e.getMessage()); }
         }
         if (esConn.available()) {
-            try { esConn.ensureRAGIndex(); }
+            try { rebuildEs = esConn.ensureRAGIndex(); }
             catch (Exception e) { log.warn("ES rag_chunks 初始化失败: {}", e.getMessage()); }
         }
+        if (rebuildMilvus || rebuildEs) rebuildRAGExternalIndexes(rebuildMilvus, rebuildEs);
     }
 
-    public void insertRAGChunks(List<Long> pgIds, List<String> contents, List<List<Float>> embeddings) {
+    public void insertRAGChunks(List<Long> pgIds, List<String> contents, List<String> docHashes,
+                                List<List<Float>> embeddings) {
         MilvusClient milvus = milvusConn.client();
         if (milvus == null || pgIds == null || pgIds.isEmpty()) return;
         try {
             List<InsertParam.Field> fields = new ArrayList<>();
             fields.add(new InsertParam.Field("pg_id", new ArrayList<>(pgIds)));
             fields.add(new InsertParam.Field("content", new ArrayList<>(contents)));
+            fields.add(new InsertParam.Field("doc_hash", new ArrayList<>(docHashes)));
             fields.add(new InsertParam.Field("embedding", new ArrayList<>(embeddings)));
-            milvus.insert(InsertParam.newBuilder()
+            milvus.upsert(UpsertParam.newBuilder()
                     .withCollectionName(MilvusConnector.RAG_COLLECTION)
                     .withFields(fields).build());
         } catch (Exception e) {
             log.warn("Milvus 插入 RAG chunks 失败: {}", e.getMessage());
+        }
+    }
+
+    private void rebuildRAGExternalIndexes(boolean rebuildMilvus, boolean rebuildEs) {
+        List<ChunkRow> rows = loadAllRAGChunks();
+        if (rows.isEmpty()) return;
+        if (rebuildEs) {
+            for (ChunkRow row : rows) indexRAGChunkInES(row.id, row.content, row.docHash, row.chunkIdx);
+        }
+        if (rebuildMilvus) {
+            List<Long> ids = new ArrayList<>();
+            List<String> contents = new ArrayList<>();
+            List<String> hashes = new ArrayList<>();
+            List<List<Float>> embeddings = new ArrayList<>();
+            for (ChunkRow row : rows) {
+                List<Float> embedding = parseEmbedding(row.embeddingJson);
+                if (embedding.isEmpty()) continue;
+                ids.add(row.id);
+                contents.add(row.content);
+                hashes.add(row.docHash);
+                embeddings.add(embedding);
+            }
+            insertRAGChunks(ids, contents, hashes, embeddings);
+        }
+        log.info("RAG external indexes rebuilt from PostgreSQL: chunks={}, milvus={}, es={}",
+                rows.size(), rebuildMilvus, rebuildEs);
+    }
+
+    private static List<Float> parseEmbedding(String json) {
+        if (json == null || json.isBlank() || "null".equals(json)) return List.of();
+        try {
+            com.fasterxml.jackson.databind.JsonNode node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+            if (!node.isArray()) return List.of();
+            List<Float> out = new ArrayList<>();
+            node.forEach(value -> out.add((float) value.asDouble()));
+            return out;
+        } catch (Exception ignored) {
+            return List.of();
         }
     }
 
@@ -371,21 +417,26 @@ public class InfrastructureService {
     }
 
     public List<MilvusHit> milvusSearchWithScores(List<Float> vector, int topK) {
+        return milvusSearchWithScores(vector, topK, null);
+    }
+
+    public List<MilvusHit> milvusSearchWithScores(List<Float> vector, int topK, Set<String> allowedDocHashes) {
         List<MilvusHit> hits = new ArrayList<>();
         MilvusClient milvus = milvusConn.client();
-        if (milvus == null) return hits;
+        if (milvus == null || allowedDocHashes != null && allowedDocHashes.isEmpty()) return hits;
         try {
             List<List<Float>> vectors = new ArrayList<>();
             vectors.add(vector);
-            R<SearchResults> resp = milvus.search(SearchParam.newBuilder()
+            SearchParam.Builder builder = SearchParam.newBuilder()
                     .withCollectionName(MilvusConnector.RAG_COLLECTION)
-                    .withMetricType(MetricType.L2)
+                    .withMetricType(MilvusConnector.RAG_METRIC)
                     .withTopK(topK)
                     .withVectors(vectors)
                     .withVectorFieldName("embedding")
                     .withParams("{\"nprobe\":10}")
-                    .addOutField("pg_id")
-                    .build());
+                    .addOutField("pg_id");
+            if (allowedDocHashes != null) builder.withExpr(milvusDocHashExpression(allowedDocHashes));
+            R<SearchResults> resp = milvus.search(builder.build());
             if (resp.getStatus() != R.Status.Success.getCode()) {
                 log.warn("Milvus 检索失败: {}", resp.getMessage());
                 return hits;
@@ -411,15 +462,25 @@ public class InfrastructureService {
     }
 
     public List<ESHit> searchRAGChunks(String query, int topK) {
+        return searchRAGChunks(query, topK, null);
+    }
+
+    public List<ESHit> searchRAGChunks(String query, int topK, Set<String> allowedDocHashes) {
         List<ESHit> hits = new ArrayList<>();
         ElasticsearchClient es = esConn.client();
-        if (es == null) return hits;
+        if (es == null || allowedDocHashes != null && allowedDocHashes.isEmpty()) return hits;
         try {
+            Query textQuery = Query.of(q -> q.multiMatch(m -> m
+                    .fields("content", "content.cjk")
+                    .query(query)));
+            Query scopedQuery = allowedDocHashes == null ? textQuery : Query.of(q -> q.bool(b -> b
+                    .must(textQuery)
+                    .filter(f -> f.terms(t -> t.field("doc_hash").terms(v -> v.value(
+                            allowedDocHashes.stream().map(FieldValue::of).toList()))))));
             SearchResponse<Map> resp = es.search(SearchRequest.of(s -> s
                     .index(ESConnector.RAG_INDEX)
                     .size(topK)
-                    .query(Query.of(q -> q.match(MatchQuery.of(m -> m
-                            .field("content").query(query)))))
+                    .query(scopedQuery)
                     .source(src -> src.filter(f -> f.includes("pg_id")))), Map.class);
             for (Hit<Map> hit : resp.hits().hits()) {
                 long pgId;
@@ -434,5 +495,12 @@ public class InfrastructureService {
             log.warn("ES 检索失败: {}", e.getMessage());
         }
         return hits;
+    }
+
+    private static String milvusDocHashExpression(Set<String> docHashes) {
+        String values = docHashes.stream()
+                .map(value -> "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+                .collect(java.util.stream.Collectors.joining(","));
+        return "doc_hash in [" + values + "]";
     }
 }

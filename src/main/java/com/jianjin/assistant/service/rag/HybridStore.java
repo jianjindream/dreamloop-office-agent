@@ -7,6 +7,7 @@ import com.jianjin.assistant.model.Chunk;
 import com.jianjin.assistant.service.graph.ChunkRef;
 import com.jianjin.assistant.service.graph.GraphSearchResult;
 import com.jianjin.assistant.service.graph.KGStore;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -19,8 +20,14 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 @Component
 public class HybridStore {
@@ -33,17 +40,26 @@ public class HybridStore {
     private Function<String, List<Double>> embedFn;
     private KGStore kg;
     private String mode = "unavailable";
+    private final ExecutorService sourceSearchExecutor;
 
     public HybridStore(AppConfig cfg, InfrastructureService infra) {
         this.cfg = cfg;
         this.infra = infra;
+        ThreadFactory threadFactory = runnable -> {
+            Thread thread = new Thread(runnable, "rag-source-search");
+            thread.setDaemon(true);
+            return thread;
+        };
+        this.sourceSearchExecutor = Executors.newFixedThreadPool(3, threadFactory);
         recomputeMode();
     }
 
     public void recomputeMode() {
-        boolean milvusOK = "connected".equals(infra.getMilvusStatus());
-        boolean esOK = "connected".equals(infra.getEsStatus());
-        if (milvusOK && esOK) mode = "hybrid";
+        boolean milvusOK = "connected".equals(infra.getMilvusStatus())
+                && sourceWeight(cfg.getRag().getSemanticWeight(), 0.7) > 0;
+        boolean esOK = "connected".equals(infra.getEsStatus())
+                && sourceWeight(cfg.getRag().getKeywordWeight(), 1.0) > 0;
+        if (cfg.getRag().isEnableHybridSearch() && milvusOK && esOK) mode = "hybrid";
         else if (milvusOK) mode = "semantic";
         else if (esOK) mode = "keyword";
         else mode = "unavailable";
@@ -52,6 +68,11 @@ public class HybridStore {
     public void setEmbedFn(Function<String, List<Double>> fn) { this.embedFn = fn; }
     public void setKGStore(KGStore kg) { this.kg = kg; }
     public String getMode() { return mode; }
+
+    @PreDestroy
+    public void close() {
+        sourceSearchExecutor.shutdownNow();
+    }
 
     /**
      * Persists large parent contexts and indexes only the small child chunks.
@@ -66,10 +87,10 @@ public class HybridStore {
         if (!oldChildIds.isEmpty()) {
             if ("connected".equals(infra.getEsStatus())) infra.deleteRAGChunksFromES(oldChildIds);
             if ("connected".equals(infra.getMilvusStatus())) infra.deleteRAGChunksFromMilvus(oldChildIds);
-            if (kg != null && kg.available()) kg.deleteDocument(docHash);
         }
         List<Long> pgIds = new ArrayList<>();
         List<String> contents = new ArrayList<>();
+        List<String> docHashes = new ArrayList<>();
         List<List<Float>> embeddings = new ArrayList<>();
         List<ChunkRef> childRefs = new ArrayList<>();
 
@@ -98,13 +119,14 @@ public class HybridStore {
                 if ("connected".equals(infra.getMilvusStatus()) && embedding != null && !embedding.isEmpty()) {
                     pgIds.add(childId);
                     contents.add(child.getContent());
+                    docHashes.add(docHash);
                     List<Float> embedding32 = new ArrayList<>(embedding.size());
                     for (Double value : embedding) embedding32.add(value.floatValue());
                     embeddings.add(embedding32);
                 }
             }
         }
-        if (!pgIds.isEmpty()) infra.insertRAGChunks(pgIds, contents, embeddings);
+        if (!pgIds.isEmpty()) infra.insertRAGChunks(pgIds, contents, docHashes, embeddings);
         return new IndexResult(docHash, childRefs);
     }
 
@@ -121,43 +143,69 @@ public class HybridStore {
     }
 
     public List<SearchResult> search(String query, int topK) {
+        return search(query, topK, null);
+    }
+
+    /**
+     * Searches only documents in {@code allowedDocHashes} when a tenant scope is supplied.
+     * A null set means unrestricted internal/evaluation search; an empty set means no access.
+     */
+    public List<SearchResult> search(String query, int topK, Set<String> allowedDocHashes) {
+        if (allowedDocHashes != null && allowedDocHashes.isEmpty()) return Collections.emptyList();
         recomputeMode();
         return switch (mode) {
-            case "hybrid" -> searchHybrid(query, topK);
-            case "semantic" -> searchSemantic(query, topK);
-            case "keyword" -> searchKeyword(query, topK);
+            case "hybrid" -> searchHybrid(query, topK, allowedDocHashes);
+            case "semantic" -> searchSemantic(query, topK, allowedDocHashes);
+            case "keyword" -> searchKeyword(query, topK, allowedDocHashes);
             default -> Collections.emptyList();
         };
     }
 
-    private List<SearchResult> searchHybrid(String query, int topK) {
-        if (embedFn == null) return searchKeyword(query, topK);
+    private List<SearchResult> searchHybrid(String query, int topK, Set<String> allowedDocHashes) {
+        if (embedFn == null) return searchKeyword(query, topK, allowedDocHashes);
         List<Double> embedding = embedFn.apply(query);
-        if (embedding == null || embedding.isEmpty()) return searchKeyword(query, topK);
+        if (embedding == null || embedding.isEmpty()) return searchKeyword(query, topK, allowedDocHashes);
 
         List<Float> queryVector = new ArrayList<>(embedding.size());
         for (Double value : embedding) queryVector.add(value.floatValue());
         int fetchK = childFetchK(topK);
-        List<InfrastructureService.MilvusHit> milvusHits = infra.milvusSearchWithScores(queryVector, fetchK);
-        List<InfrastructureService.ESHit> esHits = infra.searchRAGChunks(query, fetchK);
-        List<GraphSearchResult> kgHits = Collections.emptyList();
-        if (kg != null && kg.available()) {
-            kgHits = kg.search(query, fetchK);
-        }
+        double semanticWeight = sourceWeight(cfg.getRag().getSemanticWeight(), 0.7);
+        double keywordWeight = sourceWeight(cfg.getRag().getKeywordWeight(), 1.0);
+        double graphWeight = sourceWeight(cfg.getNeo4j().getWeight(), 0.3);
+
+        CompletableFuture<List<InfrastructureService.MilvusHit>> milvusFuture = semanticWeight > 0
+                ? CompletableFuture.supplyAsync(() -> safeSearch(() -> allowedDocHashes == null
+                        ? infra.milvusSearchWithScores(queryVector, fetchK)
+                        : infra.milvusSearchWithScores(queryVector, fetchK, allowedDocHashes), "Milvus"), sourceSearchExecutor)
+                : CompletableFuture.completedFuture(Collections.emptyList());
+        CompletableFuture<List<InfrastructureService.ESHit>> esFuture = keywordWeight > 0
+                ? CompletableFuture.supplyAsync(() -> safeSearch(() -> allowedDocHashes == null
+                        ? infra.searchRAGChunks(query, fetchK)
+                        : infra.searchRAGChunks(query, fetchK, allowedDocHashes), "Elasticsearch"), sourceSearchExecutor)
+                : CompletableFuture.completedFuture(Collections.emptyList());
+        CompletableFuture<List<GraphSearchResult>> graphFuture = graphWeight > 0 && kg != null && kg.available()
+                ? CompletableFuture.supplyAsync(() -> safeSearch(() -> allowedDocHashes == null
+                        ? kg.search(query, fetchK)
+                        : kg.search(query, fetchK, allowedDocHashes), "Neo4j"), sourceSearchExecutor)
+                : CompletableFuture.completedFuture(Collections.emptyList());
+
+        List<InfrastructureService.MilvusHit> milvusHits = milvusFuture.join();
+        List<InfrastructureService.ESHit> esHits = esFuture.join();
+        List<GraphSearchResult> kgHits = graphFuture.join();
         if (milvusHits.isEmpty() && esHits.isEmpty() && kgHits.isEmpty()) return Collections.emptyList();
 
         int k = rrfConstant();
         Map<Long, FusionHit> rrf = new HashMap<>();
         double activeWeight = 0;
         if (!milvusHits.isEmpty()) {
-            double weight = sourceWeight(cfg.getRag().getSemanticWeight(), 0.7);
+            double weight = semanticWeight;
             activeWeight += weight;
             for (int i = 0; i < milvusHits.size(); i++) {
                 mergeRrf(rrf, milvusHits.get(i).id, weight / (k + i + 1), SearchSource.MILVUS);
             }
         }
         if (!esHits.isEmpty()) {
-            double weight = sourceWeight(cfg.getRag().getKeywordWeight(), 1.0);
+            double weight = keywordWeight;
             activeWeight += weight;
             for (int i = 0; i < esHits.size(); i++) {
                 mergeRrf(rrf, esHits.get(i).pgId, weight / (k + i + 1), SearchSource.ES);
@@ -165,7 +213,7 @@ public class HybridStore {
         }
         if (!kgHits.isEmpty()) {
             // GraphSearchResult.score ranks graph hits internally; cross-source fusion uses rank only.
-            double weight = sourceWeight(cfg.getNeo4j().getWeight(), 0.3);
+            double weight = graphWeight;
             activeWeight += weight;
             for (int i = 0; i < kgHits.size(); i++) {
                 mergeRrf(rrf, kgHits.get(i).getChunkId(), weight / (k + i + 1), SearchSource.NEO4J);
@@ -182,14 +230,16 @@ public class HybridStore {
         return expandToParentContexts(childHits, topK, "hybrid");
     }
 
-    private List<SearchResult> searchSemantic(String query, int topK) {
+    private List<SearchResult> searchSemantic(String query, int topK, Set<String> allowedDocHashes) {
         if (embedFn == null) return Collections.emptyList();
         List<Double> embedding = embedFn.apply(query);
         if (embedding == null || embedding.isEmpty()) return Collections.emptyList();
         List<Float> queryVector = new ArrayList<>(embedding.size());
         for (Double value : embedding) queryVector.add(value.floatValue());
 
-        List<InfrastructureService.MilvusHit> hits = infra.milvusSearchWithScores(queryVector, childFetchK(topK));
+        List<InfrastructureService.MilvusHit> hits = allowedDocHashes == null
+                ? infra.milvusSearchWithScores(queryVector, childFetchK(topK))
+                : infra.milvusSearchWithScores(queryVector, childFetchK(topK), allowedDocHashes);
         List<ChildHit> childHits = new ArrayList<>();
         for (int i = 0; i < hits.size(); i++) {
             childHits.add(new ChildHit(hits.get(i).id, 1.0 / (rrfConstant() + i + 1), SearchSource.MILVUS.mask));
@@ -197,8 +247,10 @@ public class HybridStore {
         return expandToParentContexts(childHits, topK, "semantic");
     }
 
-    private List<SearchResult> searchKeyword(String query, int topK) {
-        List<InfrastructureService.ESHit> hits = infra.searchRAGChunks(query, childFetchK(topK));
+    private List<SearchResult> searchKeyword(String query, int topK, Set<String> allowedDocHashes) {
+        List<InfrastructureService.ESHit> hits = allowedDocHashes == null
+                ? infra.searchRAGChunks(query, childFetchK(topK))
+                : infra.searchRAGChunks(query, childFetchK(topK), allowedDocHashes);
         List<ChildHit> childHits = new ArrayList<>();
         for (int i = 0; i < hits.size(); i++) {
             childHits.add(new ChildHit(hits.get(i).pgId, 1.0 / (rrfConstant() + i + 1), SearchSource.ES.mask));
@@ -249,7 +301,18 @@ public class HybridStore {
     }
 
     private static double sourceWeight(double configured, double fallback) {
-        return configured > 0 ? configured : fallback;
+        if (Double.isNaN(configured)) return fallback;
+        return Math.max(0, configured);
+    }
+
+    private static <T> List<T> safeSearch(Supplier<List<T>> search, String source) {
+        try {
+            List<T> results = search.get();
+            return results == null ? Collections.emptyList() : results;
+        } catch (Exception e) {
+            log.warn("{} RAG search failed: {}", source, e.getMessage());
+            return Collections.emptyList();
+        }
     }
 
     private static void mergeRrf(Map<Long, FusionHit> rrf, long id, double contribution, SearchSource source) {

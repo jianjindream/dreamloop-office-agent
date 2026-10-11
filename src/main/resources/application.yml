@@ -45,9 +45,10 @@ app:
     parent-chunk-overlap: 100
     top-k: 3
     rrf-constant-k: 60
-    # 一级加权 RRF：Milvus 0.7、ES 1.0、Neo4j 使用 app.neo4j.weight（默认 0.3）。
+    # Milvus 使用 COSINE 语义相似度；一级加权 RRF：Milvus 0.7、ES 1.0、Neo4j 使用 app.neo4j.weight（默认 0.3）。权重设为 0 可禁用对应来源。
     semantic-weight: 0.7
     keyword-weight: 1.0
+    # 关闭时优先使用 Milvus 单路语义检索；Milvus 不可用时退化到 ES。
     enable-hybrid-search: true
     # 与阿里云 text-embedding-v4 的默认输出维度保持一致。
     rag-milvus-dim: "${APP_RAG_RAG_MILVUS_DIM:1024}"

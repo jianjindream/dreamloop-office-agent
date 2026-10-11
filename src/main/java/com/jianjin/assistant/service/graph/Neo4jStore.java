@@ -70,6 +70,11 @@ public class Neo4jStore {
         String[] queries = {
                 "CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE",
                 "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.type)",
+                "CREATE CONSTRAINT rag_chunk_id IF NOT EXISTS FOR (c:RagChunk) REQUIRE c.id IS UNIQUE",
+                "CREATE INDEX rag_chunk_doc_hash IF NOT EXISTS FOR (c:RagChunk) ON (c.doc_hash)",
+                "MATCH (e:Entity) WHERE e.chunk_id IS NOT NULL " +
+                        "MERGE (c:RagChunk {id: e.chunk_id}) SET c.doc_hash = e.doc_hash " +
+                        "MERGE (e)-[:MENTIONED_IN]->(c) REMOVE e.doc_hash, e.chunk_id",
                 "MATCH (m:Memory) WHERE m.user_id IS NULL SET m.user_id = 'default'",
                 "CREATE INDEX memory_node_scope IF NOT EXISTS FOR (m:Memory) ON (m.user_id, m.mem_id)"
         };

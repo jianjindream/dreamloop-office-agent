@@ -26,7 +26,10 @@ public class RagChunkRepository {
 
     public static class Row {
         public long id;
+        public String docHash;
+        public int chunkIdx;
         public String content;
+        public String embeddingJson;
     }
 
     public static class ContextRow {
@@ -86,7 +89,8 @@ public class RagChunkRepository {
         Connection connection = pg.connection();
         if (connection == null) return chunks;
         try (Statement statement = connection.createStatement();
-             ResultSet result = statement.executeQuery("SELECT id, content FROM rag_chunks ORDER BY id")) {
+             ResultSet result = statement.executeQuery(
+                     "SELECT id, doc_hash, chunk_idx, content, embedding::text AS embedding FROM rag_chunks ORDER BY id")) {
             while (result.next()) chunks.add(row(result));
         } catch (SQLException e) {
             log.warn("RAG chunk load failed: {}", e.getMessage());
@@ -100,7 +104,8 @@ public class RagChunkRepository {
         if (connection == null || ids == null || ids.isEmpty()) return chunks;
         String placeholders = String.join(",", ids.stream().map(id -> "?").toArray(String[]::new));
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT id, content FROM rag_chunks WHERE id IN (" + placeholders + ")")) {
+                "SELECT id, doc_hash, chunk_idx, content, embedding::text AS embedding " +
+                        "FROM rag_chunks WHERE id IN (" + placeholders + ")")) {
             for (int i = 0; i < ids.size(); i++) statement.setLong(i + 1, ids.get(i));
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) chunks.add(row(result));
@@ -189,8 +194,11 @@ public class RagChunkRepository {
 
     private static Row row(ResultSet result) throws SQLException {
         Row row = new Row();
-        row.id = result.getLong(1);
-        row.content = result.getString(2);
+        row.id = result.getLong("id");
+        row.docHash = result.getString("doc_hash");
+        row.chunkIdx = result.getInt("chunk_idx");
+        row.content = result.getString("content");
+        row.embeddingJson = result.getString("embedding");
         return row;
     }
 

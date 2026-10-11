@@ -15,6 +15,7 @@ import com.jianjin.assistant.dto.ChatRequest;
 import com.jianjin.assistant.dto.ChatResponse;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
 import com.jianjin.assistant.infrastructure.tool.TavilyClient;
+import com.jianjin.assistant.interfaces.http.security.RequestIdentityHolder;
 import com.jianjin.assistant.model.MemoryItem;
 import com.jianjin.assistant.model.Snapshot;
 import com.jianjin.assistant.model.Tool;
@@ -150,7 +151,7 @@ public class UnifiedAgentService {
                 params -> {
                     String q = params.get("query") != null ? params.get("query").toString() : "相关内容";
                     if (!rag.isLoaded()) throw new RuntimeException("知识库为空，请先在「私人黑洞」上传文档");
-                    return rag.query(q).answer;
+                    return rag.queryWithHistory(RequestIdentityHolder.current().ownerKey(), q, null).answer;
                 }));
 
         // search_web 工具（Tavily + LLM fallback）

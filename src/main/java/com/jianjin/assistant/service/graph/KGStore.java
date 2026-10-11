@@ -43,6 +43,7 @@ public class KGStore {
     public void indexDocument(String docHash, List<ChunkRef> chunks) {
         if (!available()) return;
         for (ChunkRef c : chunks) {
+            upsertChunk(docHash, c);
             ExtractResult result = extractor.extract(c.getContent());
             if (result.getEntities().isEmpty()) continue;
             for (Entity ent : result.getEntities()) {
@@ -59,9 +60,19 @@ public class KGStore {
         log.info("知识图谱索引完成: docHash={}, chunks={}", docHash, chunks.size());
     }
 
+    private void upsertChunk(String docHash, ChunkRef chunk) {
+        try (Session s = neo4j.session()) {
+            s.run("MERGE (c:RagChunk {id: $chunk_id}) SET c.doc_hash = $doc_hash",
+                    Values.parameters("chunk_id", chunk.getId(), "doc_hash", docHash));
+        } catch (Exception e) {
+            log.warn("Neo4j upsertChunk 失败 ({}): {}", chunk.getId(), e.getMessage());
+        }
+    }
+
     private void upsertEntity(Entity ent) {
-        String query = "MERGE (e:Entity {name: $name}) " +
-                "SET e.type = $type, e.doc_hash = $doc_hash, e.chunk_id = $chunk_id";
+        String query = "MERGE (e:Entity {name: $name}) SET e.type = $type " +
+                "MERGE (c:RagChunk {id: $chunk_id}) SET c.doc_hash = $doc_hash " +
+                "MERGE (e)-[:MENTIONED_IN]->(c)";
         try (Session s = neo4j.session()) {
             s.run(query, Values.parameters(
                     "name", ent.getName(),
@@ -79,8 +90,10 @@ public class KGStore {
         if (!Extractor.isValidRelType(rel.getRelType())) return;
         String query = "MERGE (a:Entity {name: $from}) " +
                 "MERGE (b:Entity {name: $to}) " +
-                "MERGE (a)-[r:" + rel.getRelType() + " {doc_hash: $doc_hash}]->(b) " +
-                "SET r.chunk_id = $chunk_id";
+                "MERGE (c:RagChunk {id: $chunk_id}) SET c.doc_hash = $doc_hash " +
+                "MERGE (a)-[:MENTIONED_IN]->(c) " +
+                "MERGE (b)-[:MENTIONED_IN]->(c) " +
+                "MERGE (a)-[r:" + rel.getRelType() + " {doc_hash: $doc_hash, chunk_id: $chunk_id}]->(b)";
         try (Session s = neo4j.session()) {
             s.run(query, Values.parameters(
                     "from", rel.getFromName(),
@@ -104,8 +117,11 @@ public class KGStore {
         try (Session s = neo4j.session()) {
             s.run("MATCH ()-[r {doc_hash: $doc_hash}]-() DELETE r",
                     Values.parameters("doc_hash", docHash));
-            s.run("MATCH (e:Entity) WHERE NOT (e)--() AND e.doc_hash = $doc_hash DELETE e",
+            s.run("MATCH (c:RagChunk {doc_hash: $doc_hash}) DETACH DELETE c",
                     Values.parameters("doc_hash", docHash));
+            s.run("MATCH (e:Entity {doc_hash: $doc_hash}) REMOVE e.doc_hash, e.chunk_id",
+                    Values.parameters("doc_hash", docHash));
+            s.run("MATCH (e:Entity) WHERE NOT (e)--() DELETE e");
         } catch (Exception e) {
             log.warn("Neo4j 删除文档失败 ({}): {}", docHash, e.getMessage());
         }
@@ -117,7 +133,12 @@ public class KGStore {
      * 根据查询文本抽取实体，执行子图遍历（最多 maxHops 跳），返回关联的 ChunkID 列表。
      */
     public List<GraphSearchResult> search(String queryText, int topK) {
+        return search(queryText, topK, null);
+    }
+
+    public List<GraphSearchResult> search(String queryText, int topK, Set<String> allowedDocHashes) {
         if (!available()) return List.of();
+        if (allowedDocHashes != null && allowedDocHashes.isEmpty()) return List.of();
         ExtractResult extracted = extractor.extract(queryText);
         if (extracted.getEntities().isEmpty()) return List.of();
 
@@ -133,8 +154,10 @@ public class KGStore {
                   relationshipFilter: "RELATES_TO|PART_OF|CAUSES|DESCRIBES|MENTIONS|WORKS_FOR|LOCATED_IN"
                 })
                 YIELD node AS neighbor
-                WHERE neighbor:Entity AND neighbor.chunk_id IS NOT NULL
-                WITH e.name AS seed, neighbor.name AS nb, neighbor.chunk_id AS cid,
+                WHERE neighbor:Entity
+                MATCH (neighbor)-[:MENTIONED_IN]->(chunk:RagChunk)
+                WHERE $unrestricted OR chunk.doc_hash IN $doc_hashes
+                WITH e.name AS seed, neighbor.name AS nb, chunk.id AS cid,
                      toInteger(apoc.node.degree(neighbor)) AS degree
                 RETURN cid, collect(DISTINCT seed) AS seeds, collect(DISTINCT nb) AS neighbors, max(degree) AS deg
                 ORDER BY size(seeds) DESC, deg DESC
@@ -145,7 +168,9 @@ public class KGStore {
             Result rs = s.run(cypher, Values.parameters(
                     "names", names,
                     "hops", hops,
-                    "limit", topK * 3L
+                    "limit", topK * 3L,
+                    "unrestricted", allowedDocHashes == null,
+                    "doc_hashes", allowedDocHashes == null ? List.of() : new ArrayList<>(allowedDocHashes)
             ));
             Set<Long> seen = new HashSet<>();
             while (rs.hasNext()) {
@@ -162,7 +187,7 @@ public class KGStore {
             }
         } catch (Exception e) {
             // APOC 不可用时降级
-            return searchDirect(names, topK);
+            return searchDirect(names, topK, allowedDocHashes);
         }
         results.sort(Comparator.comparingDouble(GraphSearchResult::getScore).reversed());
         if (results.size() > topK) {
@@ -171,13 +196,16 @@ public class KGStore {
         return results;
     }
 
-    private List<GraphSearchResult> searchDirect(List<String> names, int topK) {
+    private List<GraphSearchResult> searchDirect(List<String> names, int topK, Set<String> allowedDocHashes) {
         List<GraphSearchResult> results = new ArrayList<>();
         try (Session s = neo4j.session()) {
             Result rs = s.run(
-                    "MATCH (e:Entity) WHERE e.name IN $names AND e.chunk_id IS NOT NULL " +
-                            "RETURN e.chunk_id AS cid, e.name AS name ORDER BY cid LIMIT $limit",
-                    Values.parameters("names", names, "limit", (long) topK));
+                    "MATCH (e:Entity)-[:MENTIONED_IN]->(c:RagChunk) WHERE e.name IN $names " +
+                            "AND ($unrestricted OR c.doc_hash IN $doc_hashes) " +
+                            "RETURN c.id AS cid, e.name AS name ORDER BY cid LIMIT $limit",
+                    Values.parameters("names", names, "limit", (long) topK,
+                            "unrestricted", allowedDocHashes == null,
+                            "doc_hashes", allowedDocHashes == null ? List.of() : new ArrayList<>(allowedDocHashes)));
             Set<Long> seen = new HashSet<>();
             while (rs.hasNext()) {
                 Record rec = rs.next();

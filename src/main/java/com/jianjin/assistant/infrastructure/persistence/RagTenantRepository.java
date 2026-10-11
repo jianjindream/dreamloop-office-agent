@@ -7,6 +7,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -49,6 +50,25 @@ public class RagTenantRepository {
             for(int i=0;i<contextIds.size();i++) ps.setLong(i+2, contextIds.get(i));
             try(ResultSet rs=ps.executeQuery()){while(rs.next())out.add(rs.getLong(1));}
         } catch (Exception ignored) {}
+        return out;
+    }
+
+    /** Returns the document scope used to push tenant filtering into every search backend. */
+    public Set<String> documentHashes(String ownerKey) {
+        Set<String> out = new LinkedHashSet<>();
+        if (ownerKey == null || ownerKey.isBlank()) return out;
+        memoryOwners.forEach((hash, owner) -> {
+            if (ownerKey.equals(owner)) out.add(hash);
+        });
+        var connection = pg.connection();
+        if (connection == null) return out;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT doc_hash FROM rag_documents WHERE owner_key=? ORDER BY doc_hash")) {
+            ps.setString(1, ownerKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) out.add(rs.getString(1));
+            }
+        } catch (Exception ignored) { }
         return out;
     }
 

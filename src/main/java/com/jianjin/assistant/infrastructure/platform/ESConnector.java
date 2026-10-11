@@ -69,16 +69,20 @@ public class ESConnector {
     public String status() { return status; }
 
     /** 确保 RAG 索引存在 */
-    public void ensureRAGIndex() throws Exception {
-        if (client == null) return;
+    public boolean ensureRAGIndex() throws Exception {
+        if (client == null) return false;
         boolean exists = client.indices().exists(ExistsRequest.of(b -> b.index(RAG_INDEX))).value();
-        if (exists) return;
+        if (exists) return false;
         String mapping = """
                 {
                   "mappings": {
                     "properties": {
                       "pg_id": {"type": "long"},
-                      "content": {"type": "text", "analyzer": "standard"},
+                      "content": {
+                        "type": "text",
+                        "analyzer": "standard",
+                        "fields": {"cjk": {"type": "text", "analyzer": "cjk"}}
+                      },
                       "doc_hash": {"type": "keyword"},
                       "chunk_idx": {"type": "integer"}
                     }
@@ -88,6 +92,7 @@ public class ESConnector {
                 .index(RAG_INDEX)
                 .withJson(new StringReader(mapping))));
         log.info("ES rag_chunks 索引已创建");
+        return true;
     }
 
     @PreDestroy

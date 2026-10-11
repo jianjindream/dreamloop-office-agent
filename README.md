@@ -47,7 +47,7 @@ flowchart LR
 | 前端 | Vue 3、TypeScript、Vite、Pinia |
 | 模型接口 | 阿里云百炼 OpenAI 兼容的 Chat Completions 与 Embeddings API |
 | 数据持久化 | PostgreSQL 16 |
-| 检索 | Milvus、Elasticsearch、Neo4j、加权 RRF |
+| 检索 | Milvus 余弦语义检索、Elasticsearch、Neo4j、加权 RRF |
 | 事件 | Kafka（KRaft） |
 | 文档解析 | Apache PDFBox |
 | 测试 | JUnit 5、Spring Boot Test、Vitest、Playwright |
