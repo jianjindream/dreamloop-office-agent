@@ -10,6 +10,10 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class GraphMemory {
 
@@ -19,17 +23,26 @@ public class GraphMemory {
     private final KGStore kg;
     private final String userId;
     private final double simThreshold;
+    private final Executor executor;
     private volatile int prevId = -1;
+    private final ConcurrentMap<Integer, PendingGraphWrite> pendingWrites = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Integer, Integer> resolvedIds = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Integer, List<Integer>> waitingChildren = new ConcurrentHashMap<>();
 
     public GraphMemory(LongTermMemory ltm, KGStore kg, double simThreshold) {
-        this("default", ltm, kg, simThreshold);
+        this("default", ltm, kg, simThreshold, Runnable::run);
     }
 
     public GraphMemory(String userId, LongTermMemory ltm, KGStore kg, double simThreshold) {
+        this(userId, ltm, kg, simThreshold, Runnable::run);
+    }
+
+    public GraphMemory(String userId, LongTermMemory ltm, KGStore kg, double simThreshold, Executor executor) {
         this.userId = userId;
         this.ltm = ltm;
         this.kg = kg;
         this.simThreshold = simThreshold > 0 ? simThreshold : 0.7;
+        this.executor = executor;
     }
 
     public LongTermMemory ltm() { return ltm; }
@@ -47,7 +60,7 @@ public class GraphMemory {
                                        String category, List<String> tags, String slotHint) {
         boolean added = ltm.storeClassified(content, importance, embedding, category, tags, slotHint);
         if (!added) {
-            return new StoreResult(false, findMostSimilarId(embedding));
+            return new StoreResult(false, ltm.findMostSimilarId(embedding));
         }
         // 取刚加入条目
         List<MemoryItem> items = ltm.getItems();
@@ -55,16 +68,7 @@ public class GraphMemory {
         MemoryItem newItem = items.get(items.size() - 1);
         int newId = newItem.getId();
 
-        if (kg != null && kg.available()) {
-            new Thread(() -> {
-                kg.upsertMemoryNode(userId, newId, content, importance);
-                if (prevId >= 0) {
-                    kg.addMemoryEdge(userId, prevId, newId, "FOLLOWS", 1.0);
-                }
-                linkSimilarEdges(newItem, newId);
-            }, "graph-memory-store").start();
-        }
-
+        pendingWrites.put(newId, new PendingGraphWrite(prevId, content, importance));
         prevId = newId;
         return new StoreResult(true, newId);
     }
@@ -72,9 +76,10 @@ public class GraphMemory {
     private void linkSimilarEdges(MemoryItem newItem, int newId) {
         List<MemoryItem> items = ltm.getItems();
         int start = Math.max(0, items.size() - 51);
-        for (int i = start; i < items.size() - 1; i++) {
+        for (int i = start; i < items.size(); i++) {
             MemoryItem old = items.get(i);
             if (old.getId() == newId) continue;
+            if (pendingWrites.containsKey(old.getId())) continue;
             if (old.getEmbedding() == null || old.getEmbedding().isEmpty()
                     || newItem.getEmbedding() == null || newItem.getEmbedding().isEmpty()) continue;
             if (old.getEmbedding().size() != newItem.getEmbedding().size()) continue;
@@ -83,21 +88,6 @@ public class GraphMemory {
                 kg.addMemoryEdge(userId, old.getId(), newId, "SIMILAR_TO", sim);
             }
         }
-    }
-
-    private int findMostSimilarId(List<Double> embedding) {
-        if (embedding == null || embedding.isEmpty()) return -1;
-        int bestId = -1;
-        double bestSim = 0;
-        for (MemoryItem it : ltm.getItems()) {
-            if (it.getEmbedding() == null || it.getEmbedding().size() != embedding.size()) continue;
-            double s = LongTermMemory.cosine(embedding, it.getEmbedding());
-            if (s > bestSim) {
-                bestSim = s;
-                bestId = it.getId();
-            }
-        }
-        return bestId;
     }
 
     /** Recall：先做向量召回，再用图扩展邻居 */
@@ -134,25 +124,20 @@ public class GraphMemory {
 
     /** GraphAwareConsolidate：在 LTM 合并基础上保护图中心度高的节点 */
     public LongTermMemory.ConsolidationResult graphAwareConsolidate() {
-        LongTermMemory.ConsolidationResult result = ltm.consolidate();
-        if (kg == null || !kg.available()) return result;
+        if (kg == null || !kg.available()) return ltm.consolidate();
 
-        List<Integer> protectedIds = kg.getHighCentralityMemoryIds(userId, result.deleteFromDB, 3);
+        List<Integer> allIds = ltm.getItems().stream().map(MemoryItem::getId).toList();
+        List<Integer> protectedIds = kg.getHighCentralityMemoryIds(userId, allIds, 3);
+        Set<Integer> protectedSet = new HashSet<>(protectedIds);
+        LongTermMemory.ConsolidationResult result = ltm.consolidate(protectedSet);
         if (!protectedIds.isEmpty()) {
-            Set<Integer> protSet = new HashSet<>(protectedIds);
-            List<Integer> filtered = new ArrayList<>();
-            for (int id : result.deleteFromDB) {
-                if (!protSet.contains(id)) filtered.add(id);
-            }
-            log.info("图中心度保护：{} 条记忆免于删除（入度≥3）",
-                    result.deleteFromDB.size() - filtered.size());
-            result.deleteFromDB = filtered;
+            log.info("图中心度保护：{} 条记忆免于合并或过期删除（入度≥3）", protectedIds.size());
         }
 
         List<Integer> toDelete = new ArrayList<>(result.deleteFromDB);
-        new Thread(() -> {
+        executor.execute(() -> {
             for (int id : toDelete) kg.deleteMemoryNode(userId, id);
-        }, "graph-mem-delete").start();
+        });
         return result;
     }
 
@@ -162,18 +147,44 @@ public class GraphMemory {
     }
 
     public void syncLastItemPGID(int pgId) {
-        ltm.syncLastItemPGID(pgId);
         List<MemoryItem> items = ltm.getItems();
-        if (!items.isEmpty()) {
-            MemoryItem last = items.get(items.size() - 1);
-            prevId = last.getId();
-            if (kg != null && kg.available()) {
-                new Thread(() -> {
-                    try { Thread.sleep(50); } catch (InterruptedException ignored) {}
-                    kg.upsertMemoryNode(userId, last.getId(), last.getContent(), last.getImportance());
-                }, "graph-mem-sync").start();
+        if (!items.isEmpty()) syncItemPGID(items.get(items.size() - 1).getId(), pgId);
+    }
+
+    /** Resolves the temporary in-memory id to its durable id before writing any graph node or edge. */
+    public void syncItemPGID(int temporaryId, int pgId) {
+        MemoryItem item = ltm.syncItemPGID(temporaryId, pgId);
+        if (item == null) return;
+        PendingGraphWrite pending = pendingWrites.remove(temporaryId);
+        resolvedIds.put(temporaryId, pgId);
+        if (prevId == temporaryId) prevId = pgId;
+        if (kg == null || !kg.available()) return;
+
+        executor.execute(() -> {
+            String content = pending == null ? item.getContent() : pending.content();
+            double importance = pending == null ? item.getImportance() : pending.importance();
+            kg.upsertMemoryNode(userId, pgId, content, importance);
+            if (pending != null && pending.previousId() >= 0) {
+                Integer previous = resolvedIds.get(pending.previousId());
+                if (previous == null && !pendingWrites.containsKey(pending.previousId())) {
+                    previous = pending.previousId();
+                }
+                if (previous != null) {
+                    kg.addMemoryEdge(userId, previous, pgId, "FOLLOWS", 1.0);
+                } else {
+                    waitingChildren.computeIfAbsent(pending.previousId(), ignored -> new CopyOnWriteArrayList<>())
+                            .add(temporaryId);
+                }
             }
-        }
+            List<Integer> children = waitingChildren.remove(temporaryId);
+            if (children != null) {
+                for (int childTemporaryId : children) {
+                    Integer child = resolvedIds.get(childTemporaryId);
+                    if (child != null) kg.addMemoryEdge(userId, pgId, child, "FOLLOWS", 1.0);
+                }
+            }
+            linkSimilarEdges(item, pgId);
+        });
     }
 
     public boolean needConsolidation() { return ltm.needConsolidation(); }
@@ -181,4 +192,5 @@ public class GraphMemory {
     public int size() { return ltm.size(); }
 
     public record StoreResult(boolean added, int itemId) {}
+    private record PendingGraphWrite(int previousId, String content, double importance) {}
 }

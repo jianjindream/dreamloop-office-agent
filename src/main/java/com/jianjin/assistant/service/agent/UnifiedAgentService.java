@@ -1,6 +1,7 @@
 package com.jianjin.assistant.service.agent;
 
 import com.jianjin.assistant.application.chat.ChatGenerator;
+import com.jianjin.assistant.application.chat.ChatContextBuilder;
 import com.jianjin.assistant.application.chat.ChatHistoryAdapter;
 import com.jianjin.assistant.application.chat.ChatRouter;
 import com.jianjin.assistant.application.chat.MemoryWriter;
@@ -28,6 +29,7 @@ import com.jianjin.assistant.service.memory.PreferenceMemory;
 import com.jianjin.assistant.service.memory.ShortTermMemory;
 import com.jianjin.assistant.service.memory.MemoryScope;
 import com.jianjin.assistant.service.memory.MemorySpaceManager;
+import com.jianjin.assistant.service.memory.MemoryTaskExecutor;
 import com.jianjin.assistant.service.memory.SessionMemoryCoordinator;
 import com.jianjin.assistant.service.memory.SessionMemoryState;
 import com.jianjin.assistant.service.memory.UserMemorySpace;
@@ -50,6 +52,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -89,6 +92,7 @@ public class UnifiedAgentService {
     private final MemorySpaceManager memorySpaces;
     private final SessionMemoryCoordinator sessionMemory;
     private final InfrastructureService infra;
+    private final Executor memoryExecutor;
 
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
 
@@ -110,7 +114,8 @@ public class UnifiedAgentService {
     public UnifiedAgentService(AppConfig cfg, LlmService llm, RagService rag, ToolService toolService,
                                MemorySpaceManager memorySpaces, SessionMemoryCoordinator sessionMemory,
                                InfrastructureService infra,
-                               com.jianjin.assistant.service.document.DocumentLibraryService library) {
+                               com.jianjin.assistant.service.document.DocumentLibraryService library,
+                               MemoryTaskExecutor memoryExecutor) {
         this.cfg = cfg;
         this.llm = llm;
         this.rag = rag;
@@ -119,6 +124,7 @@ public class UnifiedAgentService {
         this.sessionMemory = sessionMemory;
         this.infra = infra;
         this.library = library;
+        this.memoryExecutor = memoryExecutor;
     }
 
     @PostConstruct
@@ -174,7 +180,7 @@ public class UnifiedAgentService {
         initKnowledgeGraph();
 
         // ===== application/chat 协作者装配 =====
-        memoryWriter = new MemoryWriter(cfg, llm, null, null, null, infra);
+        memoryWriter = new MemoryWriter(cfg, llm, null, null, null, infra, memoryExecutor);
         snapshotManager = new SnapshotManager(infra);
         subAgents = new com.jianjin.assistant.application.chat.subagent.SubAgentRegistry();
         com.jianjin.assistant.application.chat.subagent.BuiltinSubAgents.registerInto(
@@ -287,13 +293,9 @@ public class UnifiedAgentService {
         // 同步规则提取
         String[] extracted = pref.extractAndSave(query);
         if (extracted != null) {
+            infra.savePreference(scope.userId(), extracted[0], extracted[1]);
             resp.setExtractedInfo("已记住：" + extracted[0] + " = " + extracted[1]);
         }
-
-        String memPrefix = buildMemorySystemPrefixWithCtx(query, pref, ltm, graphMem);
-        String summary = sessionMemory.renderSummary(session.summary());
-        if (!summary.isEmpty()) memPrefix = memPrefix.isEmpty() ? summary : summary + "\n\n" + memPrefix;
-        List<Map<String, String>> histMsgs = ChatHistoryAdapter.buildHistory(stm, query);
 
         if (cancelled.get()) {
             resp.setInterrupted(true);
@@ -315,6 +317,11 @@ public class UnifiedAgentService {
             }
         }
 
+        String memPrefix = buildMemorySystemPrefixWithCtx(query, mode, pref, ltm, graphMem, toolset);
+        String summary = sessionMemory.renderSummary(session.summary());
+        if (!summary.isEmpty()) memPrefix = memPrefix.isEmpty() ? summary : summary + "\n\n" + memPrefix;
+        List<Map<String, String>> histMsgs = ChatHistoryAdapter.buildHistory(stm, query);
+
         ensureInputBudget(memPrefix, histMsgs, toolset);
 
         resp.setMode(mode);
@@ -324,7 +331,8 @@ public class UnifiedAgentService {
             case "react" -> reactLoop.runStream(resp, query, toolset, memPrefix, histMsgs, cancelled, onEvent);
             case "tool" -> new ToolModeHandler(llm, toolService, pref).run(resp, query, toolset, memPrefix, histMsgs);
             case "rag" -> {
-                RagService.QueryResult qr = rag.queryWithHistory(scope.userId(), query, toRagHistory(histMsgs, query));
+                RagService.QueryResult qr = rag.queryWithHistory(
+                        scope.userId(), query, toRagHistory(histMsgs, query), memPrefix);
                 resp.setAnswer(qr.answer);
                 resp.setSearchResults(toSearchResults(qr.results));
                 onEvent.accept(StreamEvent.ragResult(resp.getSearchResults()));
@@ -346,7 +354,7 @@ public class UnifiedAgentService {
         memoryWriter.writeAfterReply(scope.userId(), query, resp.getAnswer(), pref, ltm, graphMem);
 
         // 异步合并：有图层时使用图感知合并
-        new Thread(() -> {
+        memoryExecutor.execute(() -> {
             if (graphMem != null && graphMem.needConsolidation()) {
                 LongTermMemory.ConsolidationResult result = graphMem.graphAwareConsolidate();
                 syncConsolidationToDB(scope.userId(), result);
@@ -354,7 +362,7 @@ public class UnifiedAgentService {
                 LongTermMemory.ConsolidationResult result = ltm.consolidate();
                 syncConsolidationToDB(scope.userId(), result);
             }
-        }).start();
+        });
 
         try {
             String eventData = mapper.writeValueAsString(Map.of("query", query, "mode", resp.getMode()));
@@ -398,7 +406,7 @@ public class UnifiedAgentService {
 
     private void runAsyncPreferenceExtraction(String userId, String query, PreferenceMemory pref,
                                               LongTermMemory ltm, GraphMemory graphMem) {
-        new Thread(() -> {
+        memoryExecutor.execute(() -> {
             Map<String, String> kvs = llm.extractPreferences(query);
             if (kvs == null || kvs.isEmpty()) return;
             pref.saveBatch(kvs);
@@ -406,40 +414,37 @@ public class UnifiedAgentService {
                 infra.savePreference(userId, e.getKey(), e.getValue());
                 String content = "用户" + e.getKey() + ": " + e.getValue();
                 List<Double> emb = llm.embed(content);
-                boolean added = storeMemory(content, 0.8, emb, ltm, graphMem);
-                if (added) {
+                GraphMemory.StoreResult stored = storeMemory(content, 0.8, emb, ltm, graphMem);
+                if (stored.added()) {
                     String embJson = "null";
                     try { if (emb != null) embJson = mapper.writeValueAsString(emb); } catch (Exception ignored) {}
                     int pgId = infra.saveLongTermItem(userId, content, 0.8, embJson);
-                    syncMemoryPGID(pgId, ltm, graphMem);
+                    syncMemoryPGID(stored.itemId(), pgId, ltm, graphMem);
+                } else {
+                    MemoryItem existing = ltm.getItemById(stored.itemId());
+                    if (existing != null) persistLongTermUpdate(userId, existing);
                 }
             }
-        }, "preference-extract").start();
+        });
     }
 
-    private boolean storeMemory(String content, double importance, List<Double> emb, LongTermMemory ltm, GraphMemory graphMem) {
-        if (graphMem != null) return graphMem.store(content, importance, emb).added();
-        return ltm.store(content, importance, emb);
-    }
-
-    private void syncMemoryPGID(int pgId, LongTermMemory ltm, GraphMemory graphMem) {
-        if (graphMem != null) graphMem.syncLastItemPGID(pgId);
-        else ltm.syncLastItemPGID(pgId);
-    }
-
-    private String buildMemorySystemPrefix() {
-        UserMemorySpace defaultSpace = memorySpaces.user(MemoryScope.DEFAULT);
-        PreferenceMemory pref = defaultSpace.preferences();
-        LongTermMemory ltm = defaultSpace.longTerm();
-        List<String> parts = new ArrayList<>();
-        String prefCtx = pref.buildContext();
-        if (!prefCtx.isEmpty()) parts.add(prefCtx);
-        List<MemoryItem> ltmItems = ltm.getItems();
-        if (!ltmItems.isEmpty()) {
-            List<String> contents = ltmItems.stream().map(MemoryItem::getContent).toList();
-            parts.add("【长期记忆】\n" + String.join("\n", contents));
+    private GraphMemory.StoreResult storeMemory(String content, double importance, List<Double> emb,
+                                                LongTermMemory ltm, GraphMemory graphMem) {
+        if (graphMem != null) return graphMem.store(content, importance, emb);
+        boolean added = ltm.store(content, importance, emb);
+        int itemId;
+        if (added) {
+            List<MemoryItem> items = ltm.getItems();
+            itemId = items.isEmpty() ? -1 : items.get(items.size() - 1).getId();
+        } else {
+            itemId = ltm.findMostSimilarId(emb);
         }
-        return String.join("\n\n", parts);
+        return new GraphMemory.StoreResult(added, itemId);
+    }
+
+    private void syncMemoryPGID(int temporaryId, int pgId, LongTermMemory ltm, GraphMemory graphMem) {
+        if (graphMem != null) graphMem.syncItemPGID(temporaryId, pgId);
+        else ltm.syncItemPGID(temporaryId, pgId);
     }
 
     private void ensureInputBudget(String memPrefix, List<Map<String, String>> history, Map<String, Tool> toolset) {
@@ -462,21 +467,13 @@ public class UnifiedAgentService {
         }
     }
 
-    private String buildMemorySystemPrefixWithCtx(String query, PreferenceMemory pref,
-                                                   LongTermMemory ltm, GraphMemory graphMem) {
-        List<String> parts = new ArrayList<>();
-        String prefCtx = pref.buildContext();
-        if (!prefCtx.isEmpty()) parts.add(prefCtx);
-
-        List<Double> queryEmb = llm.embed(query);
-        List<MemoryItem> recalled = (graphMem != null
-                ? graphMem.recall(query, cfg.getMemory().getLongTermTopK(), queryEmb)
-                : ltm.recall(query, cfg.getMemory().getLongTermTopK(), queryEmb));
-        if (!recalled.isEmpty()) {
-            List<String> contents = recalled.stream().map(MemoryItem::getContent).toList();
-            parts.add("【相关记忆】\n" + String.join("\n", contents));
-        }
-        return String.join("\n\n", parts);
+    private String buildMemorySystemPrefixWithCtx(String query, String mode, PreferenceMemory pref,
+                                                   LongTermMemory ltm, GraphMemory graphMem,
+                                                   Map<String, Tool> toolset) {
+        Map<String, Tool> contextTools = toolset == null ? Map.of() : Map.copyOf(toolset);
+        ChatContextBuilder contextBuilder = new ChatContextBuilder(cfg, llm, pref, ltm, graphMem,
+                () -> contextTools, () -> null);
+        return contextBuilder.buildPrefix(query, mode);
     }
 
     private Map<String, Tool> filterTools(List<String> names) {
@@ -495,10 +492,19 @@ public class UnifiedAgentService {
                     result.deduped, result.merged, result.expired);
         }
         for (MemoryItem item : result.updateInDB) {
-            String embJson = "null";
-            try { if (item.getEmbedding() != null) embJson = mapper.writeValueAsString(item.getEmbedding()); } catch (Exception ignored) {}
-            infra.updateLongTermItem(userId, item.getId(), item.getContent(), item.getImportance(), embJson);
+            persistLongTermUpdate(userId, item);
         }
+    }
+
+    private void persistLongTermUpdate(String userId, MemoryItem item) {
+        String embJson = "null";
+        String tagsJson = null;
+        try {
+            if (item.getEmbedding() != null) embJson = mapper.writeValueAsString(item.getEmbedding());
+            if (item.getTags() != null) tagsJson = mapper.writeValueAsString(item.getTags());
+        } catch (Exception ignored) { }
+        infra.updateLongTermItemClassified(userId, item.getId(), item.getContent(), item.getImportance(), embJson,
+                item.getCategory(), tagsJson, item.getSlotHint());
     }
 
     private void restoreRAGFromDB() {

@@ -157,6 +157,12 @@ public class InfrastructureService {
         longTermRepo.update(userId, id, content, importance, embeddingJson);
     }
 
+    public void updateLongTermItemClassified(String userId, int id, String content, double importance,
+                                             String embeddingJson, String category, String tagsJson,
+                                             String slotHint) {
+        longTermRepo.updateClassified(userId, id, content, importance, embeddingJson, category, tagsJson, slotHint);
+    }
+
     public void deleteLongTermItems(String userId, List<Integer> ids) {
         longTermRepo.deleteAll(userId, ids);
     }

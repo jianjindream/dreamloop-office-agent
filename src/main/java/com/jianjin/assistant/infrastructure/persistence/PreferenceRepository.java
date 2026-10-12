@@ -8,12 +8,14 @@ import org.springframework.stereotype.Repository;
 import java.sql.*;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Repository
 public class PreferenceRepository {
 
     private static final Logger log = LoggerFactory.getLogger(PreferenceRepository.class);
     private final PostgresConnector pg;
+    private final Map<String, Map<String, String>> memoryData = new ConcurrentHashMap<>();
 
     public PreferenceRepository(PostgresConnector pg) {
         this.pg = pg;
@@ -21,7 +23,10 @@ public class PreferenceRepository {
 
     public void save(String userId, String key, String value) {
         Connection c = pg.connection();
-        if (c == null) return;
+        if (c == null) {
+            memoryData.computeIfAbsent(userId, ignored -> new ConcurrentHashMap<>()).put(key, value);
+            return;
+        }
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO user_preferences (user_id, key, value) VALUES (?, ?, ?) " +
                         "ON CONFLICT (user_id, key) DO UPDATE SET value = ?, updated_at = NOW()")) {
@@ -35,7 +40,10 @@ public class PreferenceRepository {
     public Map<String, String> loadAll(String userId) {
         Map<String, String> result = new LinkedHashMap<>();
         Connection c = pg.connection();
-        if (c == null) return result;
+        if (c == null) {
+            result.putAll(memoryData.getOrDefault(userId, Map.of()));
+            return result;
+        }
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT key, value FROM user_preferences WHERE user_id = ?")) {
             ps.setString(1, userId);

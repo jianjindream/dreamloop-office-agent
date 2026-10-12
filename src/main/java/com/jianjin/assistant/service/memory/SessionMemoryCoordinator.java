@@ -13,6 +13,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
+import org.springframework.beans.factory.annotation.Autowired;
 
 /** Keeps raw session context bounded and turns evicted complete chat turns into a durable digest. */
 @Component
@@ -21,9 +23,20 @@ public class SessionMemoryCoordinator {
     private final AppConfig cfg;
     private final LlmService llm;
     private final InfrastructureService infra;
+    private final Executor executor;
 
     public SessionMemoryCoordinator(AppConfig cfg, LlmService llm, InfrastructureService infra) {
-        this.cfg = cfg; this.llm = llm; this.infra = infra;
+        this(cfg, llm, infra, Runnable::run);
+    }
+
+    @Autowired
+    public SessionMemoryCoordinator(AppConfig cfg, LlmService llm, InfrastructureService infra,
+                                    MemoryTaskExecutor executor) {
+        this(cfg, llm, infra, (Executor) executor);
+    }
+
+    private SessionMemoryCoordinator(AppConfig cfg, LlmService llm, InfrastructureService infra, Executor executor) {
+        this.cfg = cfg; this.llm = llm; this.infra = infra; this.executor = executor;
     }
 
     public void compactBeforeRequest(MemoryScope scope, SessionMemoryState state, String incomingQuery) {
@@ -46,7 +59,7 @@ public class SessionMemoryCoordinator {
         CompactionPlan plan = plan(state.summary(), state.messages().getMessages(), null,
                 cfg.getMemory().getMinRecentTurns(), cfg.getMemory().getHistoryMaxTokens() * 3 / 5);
         if (plan.evicted().isEmpty()) { state.endAsyncSummary(); return; }
-        new Thread(() -> {
+        executor.execute(() -> {
             try {
                 // LLM work deliberately happens outside the session lock so the next user request is not blocked.
                 SessionSummary merged = summarize(plan.baseSummary(), plan.evicted());
@@ -59,7 +72,7 @@ public class SessionMemoryCoordinator {
             } finally {
                 state.endAsyncSummary();
             }
-        }, "session-summary").start();
+        });
     }
 
     public String renderSummary(SessionSummary summary) {

@@ -2,6 +2,8 @@ package com.jianjin.assistant.domain.promptctx;
 
 import com.jianjin.assistant.domain.promptctx.source.ConstraintsSource;
 import com.jianjin.assistant.domain.promptctx.source.ProfileSource;
+import com.jianjin.assistant.domain.promptctx.source.RecallSource;
+import com.jianjin.assistant.model.MemoryItem;
 import com.jianjin.assistant.service.memory.LongTermMemory;
 import com.jianjin.assistant.service.memory.PreferenceMemory;
 import org.junit.jupiter.api.Test;
@@ -56,6 +58,26 @@ class ContextAssemblerTest {
     }
 
     @Test
+    void profileAndRecallRespectConfiguredCategories() {
+        PreferenceMemory pref = new PreferenceMemory();
+        LongTermMemory ltm = new LongTermMemory();
+        ltm.storeItem(classified(1, "用户喜欢中文", "preference", 0.9));
+        ltm.storeItem(classified(2, "内部普通事实", "general", 0.9));
+
+        SourceRegistry reg = new SourceRegistry();
+        reg.register(new ProfileSource(pref, ltm));
+        reg.register(new RecallSource((query, topK, embedding) -> ltm.getItems()));
+        ContextAssembler asm = new ContextAssembler(Schemas.defaults(), reg);
+
+        String rendered = asm.assemble(new Query("测试", List.of(), "", "chat")).render();
+
+        assertTrue(rendered.contains("用户喜欢中文"));
+        assertTrue(rendered.contains("内部普通事实"), "general 记忆应进入 Recall");
+        String profile = rendered.substring(rendered.indexOf("【用户画像】"), rendered.indexOf("【相关回忆】"));
+        assertFalse(profile.contains("内部普通事实"), "general 记忆不应混入 Profile");
+    }
+
+    @Test
     void constraintsSourceRendersBlocksAndWarns() {
         SourceRegistry reg = new SourceRegistry();
         reg.register(ConstraintsSource.fromBuiltinValidator());
@@ -64,5 +86,12 @@ class ContextAssemblerTest {
         String rendered = rc.render();
         assertTrue(rendered.contains("硬性约束"));
         assertTrue(rendered.contains("禁止 sudo") || rendered.contains("禁止"));
+    }
+
+    private static MemoryItem classified(int id, String content, String category, double score) {
+        MemoryItem item = new MemoryItem(id, content, 0.8, List.of());
+        item.setCategory(category);
+        item.setScore(score);
+        return item;
     }
 }

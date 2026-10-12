@@ -6,6 +6,7 @@ import com.jianjin.assistant.service.llm.LlmService;
 import com.jianjin.assistant.service.memory.GraphMemory;
 import com.jianjin.assistant.service.memory.LongTermMemory;
 import com.jianjin.assistant.service.memory.PreferenceMemory;
+import com.jianjin.assistant.model.MemoryItem;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
@@ -14,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 public class MemoryWriter {
 
@@ -26,28 +28,36 @@ public class MemoryWriter {
     private final LongTermMemory ltm;
     private final GraphMemory graphMem;     // 可空
     private final InfrastructureService infra;
+    private final Executor executor;
 
     public MemoryWriter(AppConfig cfg, LlmService llm, PreferenceMemory pref,
                         LongTermMemory ltm, GraphMemory graphMem, InfrastructureService infra) {
+        this(cfg, llm, pref, ltm, graphMem, infra, Runnable::run);
+    }
+
+    public MemoryWriter(AppConfig cfg, LlmService llm, PreferenceMemory pref,
+                        LongTermMemory ltm, GraphMemory graphMem, InfrastructureService infra,
+                        Executor executor) {
         this.cfg = cfg;
         this.llm = llm;
         this.pref = pref;
         this.ltm = ltm;
         this.graphMem = graphMem;
         this.infra = infra;
+        this.executor = executor;
     }
 
-    /** 异步入口：从助手回复中分类提取并写入。 */
+    /** 异步入口：从用户消息与助手回复中分类提取并写入。 */
     public void writeAfterReply(String query, String answer) {
         writeAfterReply("default", query, answer, pref, ltm, graphMem);
     }
 
     public void writeAfterReply(String userId, String query, String answer, PreferenceMemory preferences,
                                 LongTermMemory longTerm, GraphMemory graphMemory) {
-        new Thread(() -> {
+        executor.execute(() -> {
             try { writeNow(userId, query, answer, preferences, longTerm, graphMemory); }
             catch (Exception e) { log.warn("MemoryWriter 写入失败: {}", e.getMessage()); }
-        }, "memory-writer").start();
+        });
     }
 
     /** 同步执行（便于单测）。 */
@@ -59,7 +69,7 @@ public class MemoryWriter {
                          LongTermMemory longTerm, GraphMemory graphMemory) {
         if (answer == null || answer.isEmpty() || !cfg.isRealLLM()) return;
 
-        List<Classified> items = classify(answer);
+        List<Classified> items = classify(query, answer);
         if (items.isEmpty()) return;
 
         for (Classified c : items) {
@@ -69,9 +79,10 @@ public class MemoryWriter {
 
     // ----------------- LLM 分类 -----------------
 
-    private List<Classified> classify(String answer) {
-        String prompt = "从下面这段AI助手的回复中，识别出值得长期记住的信息，并按类别分类。\n" +
-                "可用类别（必须二选一）：\n" +
+    private List<Classified> classify(String query, String answer) {
+        String prompt = "从下面的用户消息和AI助手回复中，识别值得长期记住、且能由用户消息直接支持的信息，并按类别分类。\n" +
+                "禁止把助手自行推断、建议、示例或不确定内容写成用户事实。工具失败只能来自回复中明确报告的实际执行结果。\n" +
+                "可用类别（必须选择其一）：\n" +
                 "- identity：用户身份信息（姓名、职业、所在城市/国家、母语等不变属性）\n" +
                 "- preference：用户偏好（喜好、习惯、风格、关注主题）\n" +
                 "- tool_failure：本次工具调用中遇到的失败/教训（如工具不存在、参数错误、网络超时）\n" +
@@ -79,7 +90,7 @@ public class MemoryWriter {
                 "- general：以上都不是但仍值得记住的客观事实\n\n" +
                 "请输出 JSON：{\"items\":[{\"category\":\"...\",\"content\":\"...\",\"tags\":[\"...\"]}]}\n" +
                 "如果没有值得记忆的内容，输出 {\"items\":[]}。只输出 JSON，不要解释。\n\n" +
-                "回复：" + answer;
+                "用户消息：" + (query == null ? "" : query) + "\n\nAI助手回复：" + answer;
 
         String raw;
         try {
@@ -146,12 +157,20 @@ public class MemoryWriter {
         try { emb = llm.embed(c.content); } catch (Exception e) { emb = null; }
 
         boolean added;
+        int itemId;
         if (graphMemory != null) {
-            added = graphMemory.storeClassified(c.content, importance, emb, c.category, c.tags, slotHint).added();
+            GraphMemory.StoreResult result = graphMemory.storeClassified(
+                    c.content, importance, emb, c.category, c.tags, slotHint);
+            added = result.added();
+            itemId = result.itemId();
         } else {
             added = longTerm.storeClassified(c.content, importance, emb, c.category, c.tags, slotHint);
+            itemId = added ? lastItemId(longTerm) : longTerm.findMostSimilarId(emb);
         }
-        if (!added) return;
+        if (!added) {
+            persistExisting(userId, longTerm, itemId);
+            return;
+        }
 
         // PG 同步
         String embJson = "null";
@@ -159,10 +178,28 @@ public class MemoryWriter {
         String tagsJson = null;
         try { if (c.tags != null && !c.tags.isEmpty()) tagsJson = M.writeValueAsString(c.tags); } catch (Exception ignored) {}
         int pgId = infra.saveLongTermItemClassified(userId, c.content, importance, embJson, c.category, tagsJson, slotHint);
-        if (graphMemory != null) graphMemory.syncLastItemPGID(pgId);
-        else longTerm.syncLastItemPGID(pgId);
+        if (graphMemory != null) graphMemory.syncItemPGID(itemId, pgId);
+        else longTerm.syncItemPGID(itemId, pgId);
 
         log.info("MemoryWriter: {} -> {} (importance={})", c.category, c.content, importance);
+    }
+
+    private void persistExisting(String userId, LongTermMemory longTerm, int itemId) {
+        MemoryItem item = longTerm.getItemById(itemId);
+        if (item == null) return;
+        String embJson = "null";
+        String tagsJson = null;
+        try {
+            if (item.getEmbedding() != null) embJson = M.writeValueAsString(item.getEmbedding());
+            if (item.getTags() != null) tagsJson = M.writeValueAsString(item.getTags());
+        } catch (Exception ignored) { }
+        infra.updateLongTermItemClassified(userId, item.getId(), item.getContent(), item.getImportance(), embJson,
+                item.getCategory(), tagsJson, item.getSlotHint());
+    }
+
+    private static int lastItemId(LongTermMemory longTerm) {
+        List<MemoryItem> items = longTerm.getItems();
+        return items.isEmpty() ? -1 : items.get(items.size() - 1).getId();
     }
 
     private static double importanceFor(String category) {

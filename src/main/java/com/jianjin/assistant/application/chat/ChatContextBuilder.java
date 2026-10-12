@@ -51,9 +51,9 @@ public class ChatContextBuilder {
         registry.register(ConstraintsSource.fromBuiltinValidator());
         // 优先用图记忆作 Recaller；图层不可用时退化到 LTM
         if (graphMem != null) {
-            registry.register(new RecallSource(graphMem::recall));
+            registry.register(new RecallSource(graphMem::recall, cfg.getMemory().getLongTermTopK()));
         } else {
-            registry.register(new RecallSource(ltm::recall));
+            registry.register(new RecallSource(ltm::recall, cfg.getMemory().getLongTermTopK()));
         }
         this.assembler = new ContextAssembler(Schemas.defaults(), registry);
     }

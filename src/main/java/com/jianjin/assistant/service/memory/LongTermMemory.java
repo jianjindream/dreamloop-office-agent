@@ -22,17 +22,37 @@ public class LongTermMemory {
         this.consolidationCfg = cfg;
     }
 
-    public List<MemoryItem> getItems() { return new ArrayList<>(items); }
+    public synchronized List<MemoryItem> getItems() { return new ArrayList<>(items); }
 
-    public int size() { return items.size(); }
+    public synchronized int size() { return items.size(); }
+
+    public synchronized MemoryItem getItemById(int id) {
+        for (MemoryItem item : items) if (item.getId() == id) return item;
+        return null;
+    }
+
+    public synchronized int findMostSimilarId(List<Double> embedding) {
+        if (embedding == null || embedding.isEmpty()) return -1;
+        int bestId = -1;
+        double bestSimilarity = -1;
+        for (MemoryItem item : items) {
+            if (item.getEmbedding() == null || item.getEmbedding().size() != embedding.size()) continue;
+            double similarity = cosine(embedding, item.getEmbedding());
+            if (similarity > bestSimilarity) {
+                bestSimilarity = similarity;
+                bestId = item.getId();
+            }
+        }
+        return bestId;
+    }
 
     // --- Store ---
 
-    public boolean store(String content, double importance, List<Double> embedding) {
+    public synchronized boolean store(String content, double importance, List<Double> embedding) {
         return storeClassified(content, importance, embedding, "general", null, null);
     }
 
-    public boolean storeClassified(String content, double importance, List<Double> embedding,
+    public synchronized boolean storeClassified(String content, double importance, List<Double> embedding,
                                    String category, List<String> tags, String slotHint) {
         // Dedup check（沿用原 store 行为）
         if (consolidationCfg != null && !items.isEmpty() && embedding != null && !embedding.isEmpty()) {
@@ -76,7 +96,7 @@ public class LongTermMemory {
         return true;
     }
 
-    public void storeItem(MemoryItem item) {
+    public synchronized void storeItem(MemoryItem item) {
         buildVocab(item.getContent());
         if (item.getId() >= nextId) nextId = item.getId() + 1;
         if (item.getCreatedAt() == null) item.setCreatedAt(LocalDateTime.now());
@@ -84,14 +104,22 @@ public class LongTermMemory {
         items.add(item);
     }
 
-    public void syncLastItemPGID(int pgId) {
-        if (!items.isEmpty() && pgId > 0) {
-            items.get(items.size() - 1).setId(pgId);
-            if (pgId >= nextId) nextId = pgId + 1;
-        }
+    public synchronized void syncLastItemPGID(int pgId) {
+        if (!items.isEmpty()) syncItemPGID(items.get(items.size() - 1).getId(), pgId);
     }
 
-    public boolean needConsolidation() {
+    public synchronized MemoryItem syncItemPGID(int currentId, int pgId) {
+        if (pgId <= 0) return null;
+        for (MemoryItem item : items) {
+            if (item.getId() != currentId) continue;
+            item.setId(pgId);
+            if (pgId >= nextId) nextId = pgId + 1;
+            return item;
+        }
+        return null;
+    }
+
+    public synchronized boolean needConsolidation() {
         return consolidationCfg != null
                 && consolidationCfg.getTriggerInterval() > 0
                 && storeCount >= consolidationCfg.getTriggerInterval();
@@ -99,7 +127,7 @@ public class LongTermMemory {
 
     // --- Recall ---
 
-    public List<MemoryItem> recall(String query, int topK, List<Double> queryEmbedding) {
+    public synchronized List<MemoryItem> recall(String query, int topK, List<Double> queryEmbedding) {
         if (items.isEmpty()) return Collections.emptyList();
         final double threshold = 0.4;
 
@@ -135,7 +163,7 @@ public class LongTermMemory {
         return result;
     }
 
-    public List<MemoryItem> recallByFilter(String query, List<Double> queryEmbedding, LongTermFilter filter) {
+    public synchronized List<MemoryItem> recallByFilter(String query, List<Double> queryEmbedding, LongTermFilter filter) {
         if (items.isEmpty()) return Collections.emptyList();
         if (filter == null) filter = new LongTermFilter();
         final double threshold = filter.minScore != null ? filter.minScore : 0.4;
@@ -199,8 +227,17 @@ public class LongTermMemory {
     // --- Consolidation ---
 
     public ConsolidationResult consolidate() {
+        return consolidate(Collections.emptySet());
+    }
+
+    /**
+     * Consolidates memory while keeping protected graph-central items in the in-memory and durable sets.
+     * Protected items may still influence similarity checks, but are never removed or merged away.
+     */
+    public synchronized ConsolidationResult consolidate(Set<Integer> protectedIds) {
         ConsolidationResult result = new ConsolidationResult();
         if (consolidationCfg == null || items.size() <= 1) return result;
+        Set<Integer> protectedSet = protectedIds == null ? Collections.emptySet() : protectedIds;
         storeCount = 0;
         Set<Integer> removed = new HashSet<>();
 
@@ -217,7 +254,19 @@ public class LongTermMemory {
                 if (removed.contains(j)) continue;
                 double sim = itemSimilarity(items.get(i), items.get(j));
                 if (sim >= consolidationCfg.getDedupThreshold()) {
-                    if (items.get(j).getImportance() >= items.get(i).getImportance()) {
+                    boolean protectI = protectedSet.contains(items.get(i).getId());
+                    boolean protectJ = protectedSet.contains(items.get(j).getId());
+                    if (protectI && protectJ) {
+                        continue;
+                    } else if (protectI) {
+                        removed.add(j);
+                        result.deduped++;
+                        result.deleteFromDB.add(items.get(j).getId());
+                    } else if (protectJ) {
+                        removed.add(i);
+                        result.deduped++;
+                        result.deleteFromDB.add(items.get(i).getId());
+                    } else if (items.get(j).getImportance() >= items.get(i).getImportance()) {
                         removed.add(i);
                         result.deduped++;
                         result.deleteFromDB.add(items.get(i).getId());
@@ -227,6 +276,10 @@ public class LongTermMemory {
                         result.deleteFromDB.add(items.get(j).getId());
                     }
                 } else if (sim >= consolidationCfg.getSimilarityThreshold()) {
+                    // A graph-central record must remain stable: do not replace its id/content through a merge.
+                    if (protectedSet.contains(items.get(i).getId()) || protectedSet.contains(items.get(j).getId())) {
+                        continue;
+                    }
                     MemoryItem merged = mergeItems(items.get(i), items.get(j));
                     items.set(i, merged);
                     removed.add(j);
@@ -234,12 +287,14 @@ public class LongTermMemory {
                     result.deleteFromDB.add(items.get(j).getId());
                     result.updateInDB.add(merged);
                 }
+                if (removed.contains(i)) break;
             }
         }
 
         // Phase 3: Expire
         for (int i = 0; i < items.size(); i++) {
             if (removed.contains(i)) continue;
+            if (protectedSet.contains(items.get(i).getId())) continue;
             double days = ChronoUnit.HOURS.between(items.get(i).getCreatedAt(), LocalDateTime.now()) / 24.0;
             if (consolidationCfg.getTtlDays() > 0
                     && days > consolidationCfg.getTtlDays()
@@ -317,6 +372,14 @@ public class LongTermMemory {
         merged.setEmbedding(base.getEmbedding());
         merged.setCreatedAt(base.getCreatedAt());
         merged.setLastAccessed(LocalDateTime.now());
+        merged.setCategory(moreSpecificCategory(base.getCategory(), other.getCategory()));
+        List<String> mergedTags = new ArrayList<>(base.getTags() == null ? Collections.emptyList() : base.getTags());
+        if (other.getTags() != null) {
+            for (String tag : other.getTags()) if (!mergedTags.contains(tag)) mergedTags.add(tag);
+        }
+        merged.setTags(mergedTags);
+        merged.setSlotHint(base.getSlotHint() != null && !base.getSlotHint().isBlank()
+                ? base.getSlotHint() : other.getSlotHint());
 
         if (!base.getContent().contains(other.getContent()) && !other.getContent().contains(base.getContent())) {
             merged.setContent(base.getContent() + "；" + other.getContent());
@@ -340,6 +403,12 @@ public class LongTermMemory {
             }
         }
         return merged;
+    }
+
+    private static String moreSpecificCategory(String first, String second) {
+        String a = first == null || first.isBlank() ? "general" : first;
+        String b = second == null || second.isBlank() ? "general" : second;
+        return "general".equals(a) && !"general".equals(b) ? b : a;
     }
 
     // --- Static utility ---

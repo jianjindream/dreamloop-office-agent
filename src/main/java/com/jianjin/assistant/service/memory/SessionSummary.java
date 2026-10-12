@@ -1,5 +1,6 @@
 package com.jianjin.assistant.service.memory;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -17,6 +18,7 @@ public class SessionSummary {
     public List<String> contextNotes = new ArrayList<>();
     public long summarizedThroughId;
 
+    @JsonIgnore
     public boolean isEmpty() {
         return goal.isBlank() && constraints.isEmpty() && decisions.isEmpty() && completed.isEmpty()
                 && pending.isEmpty() && entities.isEmpty() && openQuestions.isEmpty() && contextNotes.isEmpty();

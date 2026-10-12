@@ -45,6 +45,8 @@ public class ProfileSource implements ContextSource {
             int count = 0;
             for (MemoryItem item : ltm.getItems()) {
                 if (count >= limit) break;
+                String category = item.getCategory() == null ? "general" : item.getCategory();
+                if (!slot.getFilter().getCategories().contains(category)) continue;
                 items.add(new ContextItem(item.getContent(), item.getImportance(), id()));
                 count++;
             }

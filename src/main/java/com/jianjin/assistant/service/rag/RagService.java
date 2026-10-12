@@ -178,7 +178,12 @@ public class RagService {
     }
 
     public QueryResult queryWithHistory(String ownerKey, String question, List<HistoryMessage> history) {
-        QueryTrace trace = traceQueryWithHistory(ownerKey, question, history);
+        return queryWithHistory(ownerKey, question, history, null);
+    }
+
+    public QueryResult queryWithHistory(String ownerKey, String question, List<HistoryMessage> history,
+                                        String systemPrefix) {
+        QueryTrace trace = traceQueryWithHistory(ownerKey, question, history, systemPrefix);
         return new QueryResult(trace.answer, trace.finalContexts);
     }
 
@@ -195,6 +200,11 @@ public class RagService {
     }
 
     private QueryTrace traceQueryWithHistory(String ownerKey, String question, List<HistoryMessage> history) {
+        return traceQueryWithHistory(ownerKey, question, history, null);
+    }
+
+    private QueryTrace traceQueryWithHistory(String ownerKey, String question, List<HistoryMessage> history,
+                                             String systemPrefix) {
         QueryTrace trace = new QueryTrace();
         trace.originalQuestion = question;
         trace.mode = store.getMode();
@@ -258,6 +268,9 @@ public class RagService {
         String answer;
         if (generateFn != null) {
             String systemPrompt = "你是一个基于知识库回答问题的助手。请仅根据提供的上下文内容回答问题，不要编造信息。如果上下文不足以回答，请说明。";
+            if (systemPrefix != null && !systemPrefix.isBlank()) {
+                systemPrompt = systemPrefix + "\n\n" + systemPrompt;
+            }
             String userMsg = String.format("上下文：\n%s\n\n问题：%s", context, primary.text());
             answer = generateFn.apply(systemPrompt, userMsg);
         } else {
