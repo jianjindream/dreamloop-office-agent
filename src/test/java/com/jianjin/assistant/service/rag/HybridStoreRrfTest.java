@@ -113,6 +113,24 @@ class HybridStoreRrfTest {
         }
     }
 
+    @Test
+    void twelveParentCandidatesFetchFortyEightChildrenPerSource() {
+        AppConfig cfg = new AppConfig();
+        InfrastructureService infra = mock(InfrastructureService.class);
+        when(infra.getMilvusStatus()).thenReturn("connected");
+        when(infra.getEsStatus()).thenReturn("connected");
+
+        HybridStore store = new HybridStore(cfg, infra);
+        store.setEmbedFn(query -> List.of(0.1));
+        try {
+            store.search("query", 12);
+            verify(infra).milvusSearchWithScores(anyList(), org.mockito.ArgumentMatchers.eq(48));
+            verify(infra).searchRAGChunks("query", 48);
+        } finally {
+            store.close();
+        }
+    }
+
     private static InfrastructureService.RagContextRow context(long childId) {
         InfrastructureService.RagContextRow row = new InfrastructureService.RagContextRow();
         row.childId = childId;

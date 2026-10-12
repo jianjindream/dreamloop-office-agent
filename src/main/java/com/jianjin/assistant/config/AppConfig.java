@@ -136,6 +136,8 @@ public class AppConfig {
         /** Zero derives twice the child overlap. */
         private int parentChunkOverlap = 0;
         private int topK = 3;
+        /** Parent contexts retained after source/query RRF before the final topK cut. */
+        private int candidateParentK = 12;
         private int rrfConstantK = 60;
         private double semanticWeight = 0.7;
         private double keywordWeight = 1.0;
@@ -157,6 +159,8 @@ public class AppConfig {
         public void setParentChunkOverlap(int parentChunkOverlap) { this.parentChunkOverlap = parentChunkOverlap; }
         public int getTopK() { return topK; }
         public void setTopK(int topK) { this.topK = topK; }
+        public int getCandidateParentK() { return candidateParentK; }
+        public void setCandidateParentK(int candidateParentK) { this.candidateParentK = candidateParentK; }
         public int getRrfConstantK() { return rrfConstantK; }
         public void setRrfConstantK(int rrfConstantK) { this.rrfConstantK = rrfConstantK; }
         public double getSemanticWeight() { return semanticWeight; }

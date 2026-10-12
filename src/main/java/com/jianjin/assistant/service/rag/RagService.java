@@ -213,10 +213,9 @@ public class RagService {
         Set<String> allowedDocHashes = ownerKey == null || tenantRepository == null
                 ? null : tenantRepository.documentHashes(ownerKey);
 
-        // Fetch extra parent contexts only when reranking is enabled.
-        int fetchK = ownerKey == null
-                ? (reranker != null ? Math.max(cfg.getRag().getTopK() * 4, 10) : cfg.getRag().getTopK())
-                : Math.max(100, cfg.getRag().getTopK() * 8);
+        // Keep a bounded parent candidate pool for source RRF, query RRF and optional reranking.
+        // HybridStore retrieves four child chunks per requested parent, so the default is 48 -> 12 -> 3.
+        int fetchK = Math.max(cfg.getRag().getTopK(), cfg.getRag().getCandidateParentK());
         List<HybridStore.SearchResult> primaryHits = filterOwned(ownerKey,
                 searchStore(primary.text(), fetchK, allowedDocHashes));
         List<ScoredChunk> results = toScored(primaryHits);
@@ -297,7 +296,10 @@ public class RagService {
         if (cfg.getRag().getRewrite().getNumQueries() <= 1 || "unavailable".equals(store.getMode())) return false;
         if (primaryHits == null || primaryHits.size() < cfg.getRag().getTopK()) return true;
         if (!"hybrid".equals(store.getMode())) return false;
-        return primaryHits.stream().noneMatch(hit -> hit.sourceSupportCount >= 2);
+        // Consensus far below the final answer cut should not suppress query expansion.
+        return primaryHits.stream()
+                .limit(cfg.getRag().getTopK())
+                .noneMatch(hit -> hit.sourceSupportCount >= 2);
     }
 
     private List<ScoredChunk> mergePrimaryAndVariants(QuerySpec primary,

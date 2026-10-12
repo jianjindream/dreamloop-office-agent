@@ -43,6 +43,8 @@ app:
     # Small-to-big chunking: retrieve 200-character children, send 800-character parents to the LLM.
     parent-chunk-size: 800
     parent-chunk-overlap: 100
+    # Each source retrieves 4x this many child chunks (12 -> 48); RRF keeps 12 parents before final top-k.
+    candidate-parent-k: 12
     top-k: 3
     rrf-constant-k: 60
     # Milvus 使用 COSINE 语义相似度；一级加权 RRF：Milvus 0.7、ES 1.0、Neo4j 使用 app.neo4j.weight（默认 0.3）。权重设为 0 可禁用对应来源。

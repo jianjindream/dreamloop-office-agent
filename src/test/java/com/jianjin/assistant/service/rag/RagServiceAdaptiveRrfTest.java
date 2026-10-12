@@ -53,8 +53,8 @@ class RagServiceAdaptiveRrfTest {
         when(store.getMode()).thenReturn("hybrid");
         List<HybridStore.SearchResult> primary = List.of(
                 result(1, "a"), result(2, "b"), result(3, "c"));
-        when(store.search("primary", 3)).thenReturn(primary);
-        when(store.search("variant", 3)).thenReturn(List.of(result(4, "d")));
+        when(store.search("primary", 12)).thenReturn(primary);
+        when(store.search("variant", 12)).thenReturn(List.of(result(4, "d")));
 
         AtomicBoolean expanded = new AtomicBoolean(false);
         Rewriter rewriter = new Rewriter() {
@@ -83,11 +83,47 @@ class RagServiceAdaptiveRrfTest {
     }
 
     @Test
+    void consensusBelowFinalTopKDoesNotSuppressExpansion() {
+        AppConfig cfg = new AppConfig();
+        HybridStore store = mock(HybridStore.class);
+        when(store.getMode()).thenReturn("hybrid");
+        when(store.search("primary", 12)).thenReturn(List.of(
+                result(1, "a"), result(2, "b"), result(3, "c"),
+                new HybridStore.SearchResult(4, new Chunk(0, "low-ranked consensus"),
+                        0.01, "hybrid", 3)));
+        when(store.search("variant", 12)).thenReturn(List.of(result(5, "d")));
+
+        AtomicBoolean expanded = new AtomicBoolean(false);
+        Rewriter rewriter = new Rewriter() {
+            @Override
+            public QuerySpec rewritePrimary(String query, List<HistoryMessage> history) {
+                return new QuerySpec("primary", QueryType.PRIMARY);
+            }
+
+            @Override
+            public List<QuerySpec> expand(String primaryQuery, List<HistoryMessage> history) {
+                expanded.set(true);
+                return List.of(new QuerySpec("variant", QueryType.VARIANT));
+            }
+        };
+
+        RagService service = new RagService(cfg, store, mock(TextSplitter.class), mock(InfrastructureService.class));
+        service.setRewriter(rewriter);
+        service.restoreChunks(List.of(new Chunk(1, "loaded")));
+        try {
+            service.queryWithHistory("question", List.of());
+            assertTrue(expanded.get());
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
     void tenantDocumentScopeIsPushedIntoTheStoreSearch() {
         AppConfig cfg = new AppConfig();
         HybridStore store = mock(HybridStore.class);
         when(store.getMode()).thenReturn("hybrid");
-        when(store.search("question", 100, Set.of("doc-a"))).thenReturn(List.of(result(1, "owned")));
+        when(store.search("question", 12, Set.of("doc-a"))).thenReturn(List.of(result(1, "owned")));
         RagTenantRepository tenants = mock(RagTenantRepository.class);
         when(tenants.documentHashes("workspace:user")).thenReturn(Set.of("doc-a"));
         when(tenants.allowedContexts("workspace:user", List.of(1L))).thenReturn(Set.of(1L));
@@ -98,7 +134,7 @@ class RagServiceAdaptiveRrfTest {
         try {
             RagService.QueryResult output = service.queryWithHistory("workspace:user", "question", List.of());
             assertEquals(1, output.results.size());
-            verify(store).search("question", 100, Set.of("doc-a"));
+            verify(store).search("question", 12, Set.of("doc-a"));
         } finally {
             service.close();
         }
@@ -109,7 +145,7 @@ class RagServiceAdaptiveRrfTest {
         AppConfig cfg = new AppConfig();
         HybridStore store = mock(HybridStore.class);
         when(store.getMode()).thenReturn("hybrid");
-        when(store.search("alpha", 3)).thenReturn(List.of());
+        when(store.search("alpha", 12)).thenReturn(List.of());
         InfrastructureService infra = mock(InfrastructureService.class);
         InfrastructureService.ChunkRow child = new InfrastructureService.ChunkRow();
         child.id = 7L;
