@@ -7,6 +7,7 @@ public class TaskStep {
     public static final String RUNNING = "running";
     public static final String DONE = "done";
     public static final String FAILED = "failed";
+    public static final String SKIPPED = "skipped";
     public static final String INTERRUPTED = "interrupted";
 
     private int id;

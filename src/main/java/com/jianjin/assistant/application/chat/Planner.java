@@ -170,6 +170,7 @@ public class Planner {
                 - type 只能是 "tool" 或 "sub_agent"
                 - 工具节点填写 tool 和 params；子 Agent 节点填写 agent 和 goal
                 - 如果节点 B 需要节点 A 的输出，则 B 的 depends_on 包含 A 的 id
+                - 工具参数需要引用上游结果时，使用 {{节点id.result}}，例如 {"text":"{{n1.result}}"}
                 - 如果两个工具功能类似（如多个搜索源），设相同的 race_group，系统会并行执行谁先返回用谁
                 - 无依赖关系的节点不要互相等待，depends_on 设为 []
                 - 需要研究、总结、报告、写文档时，优先使用 research_agent / writer_agent / review_agent / doc_agent 组合

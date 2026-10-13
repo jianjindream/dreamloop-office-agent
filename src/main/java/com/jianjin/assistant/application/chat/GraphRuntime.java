@@ -24,8 +24,11 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -140,11 +143,19 @@ public class GraphRuntime {
                     return interrupted("在第 " + li + " 层执行前被中断");
                 }
                 List<String> level = levels.get(li);
-                List<RaceGroup> groups = groupByRace(level);
+                List<String> runnable = new ArrayList<>();
+                for (String id : level) {
+                    if (dependenciesSucceeded(id)) {
+                        runnable.add(id);
+                    } else {
+                        skipForFailedDependencies(id);
+                    }
+                }
+                List<RaceGroup> groups = groupByRace(runnable);
                 CountDownLatch latch = new CountDownLatch(groups.size());
                 for (RaceGroup g : groups) {
                     if (!g.raceGroup.isEmpty() && cfg.enableRacing && g.nodeIds.size() > 1) {
-                        pool.execute(() -> { try { runRace(pool, g); } finally { latch.countDown(); } });
+                        pool.execute(() -> { try { runRace(g); } finally { latch.countDown(); } });
                     } else {
                         // 独立并行：组内每个节点都是一个独立子任务
                         CountDownLatch innerLatch = new CountDownLatch(g.nodeIds.size());
@@ -213,31 +224,31 @@ public class GraphRuntime {
         return result;
     }
 
-    private void runRace(ExecutorService pool, RaceGroup g) {
-        AtomicBoolean winnerFound = new AtomicBoolean(false);
+    private void runRace(RaceGroup g) {
+        AtomicBoolean raceClosed = new AtomicBoolean(false);
         BlockingQueue<RaceAttempt> ch = new ArrayBlockingQueue<>(g.nodeIds.size());
         Map<String, Thread> threads = new HashMap<>();
 
         for (String id : g.nodeIds) {
             Thread t = new Thread(() -> {
-                if (winnerFound.get() || cancelled.get()) {
-                    ch.offer(new RaceAttempt(id, null, "竞速取消"));
+                if (raceClosed.get() || cancelled.get()) {
+                    ch.offer(RaceAttempt.skipped(id, "竞速取消"));
                     return;
                 }
-                acquire();
+                boolean acquired = acquire();
+                if (!acquired) {
+                    ch.offer(RaceAttempt.skipped(id, "竞速等待被中断"));
+                    return;
+                }
                 try {
-                    if (winnerFound.get() || cancelled.get()) {
-                        ch.offer(new RaceAttempt(id, null, "竞速取消"));
+                    if (raceClosed.get() || cancelled.get()) {
+                        ch.offer(RaceAttempt.skipped(id, "竞速取消"));
                         return;
                     }
-                    String r = doExecuteNode(id, winnerFound);
-                    if (r == null) {
-                        ch.offer(new RaceAttempt(id, null, errorOf(id)));
-                    } else {
-                        ch.offer(new RaceAttempt(id, r, null));
-                    }
+                    ch.offer(executeAttempt(id, raceClosed));
                 } catch (Throwable ex) {
-                    ch.offer(new RaceAttempt(id, null, ex.getMessage()));
+                    ch.offer(RaceAttempt.failed(id,
+                            ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage()));
                 } finally {
                     sem.release();
                 }
@@ -251,7 +262,8 @@ public class GraphRuntime {
         }
 
         long deadline = System.currentTimeMillis() + cfg.raceTimeoutMs;
-        String lastErr = null;
+        Map<String, RaceAttempt> attempts = new LinkedHashMap<>();
+        RaceAttempt winner = null;
         int collected = 0;
         try {
             while (collected < g.nodeIds.size()) {
@@ -260,64 +272,97 @@ public class GraphRuntime {
                 RaceAttempt r = ch.poll(left, TimeUnit.MILLISECONDS);
                 if (r == null) break;
                 collected++;
-                if (r.err == null && winnerFound.compareAndSet(false, true)) {
-                    // 胜出 → 写结果 + 取消其余
-                    Node node = graph.getNodes().get(r.id);
-                    synchronized (mu) {
-                        results.put(r.id, r.result);
-                        graph.setNodeStatus(r.id, NodeStatus.DONE);
-                        graph.setNodeResult(r.id, r.result);
-                    }
-                    onEvent.accept(StreamEvent.raceWon(g.raceGroup, r.id, node.getToolName()));
-                    onEvent.accept(StreamEvent.observation(node.getToolName(), r.result));
-                    // 中断其它仍在跑的线程（确保 sleep 重试能立即返回）
-                    for (Map.Entry<String, Thread> e : threads.entrySet()) {
-                        if (!e.getKey().equals(r.id)) e.getValue().interrupt();
-                    }
-                } else if (!winnerFound.get() && r.err != null) {
-                    lastErr = r.err;
+                attempts.put(r.id, r);
+                if (r.status == NodeStatus.DONE) {
+                    winner = r;
+                    raceClosed.set(true);
+                    interruptRaceLosers(threads, r.id);
+                    break;
                 }
             }
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
+        } finally {
+            // 无论胜出、全部失败还是超时，都关闭竞速，避免迟到线程回写节点状态。
+            raceClosed.set(true);
+            interruptRaceLosers(threads, winner == null ? null : winner.id);
+            joinRaceThreads(threads, 200);
         }
 
         // 结算：未胜出节点 → 标 SKIPPED；都失败 → FAILED
-        synchronized (mu) {
-            if (winnerFound.get()) {
-                for (String id : g.nodeIds) {
-                    Node n = graph.getNodes().get(id);
-                    if (n.getStatus() != NodeStatus.DONE) {
+        if (winner != null) {
+            Node winnerNode = graph.getNodes().get(winner.id);
+            applyAttempt(winner);
+            onEvent.accept(StreamEvent.nodeDone(winner.id, winnerNode.executorName(), NodeStatus.DONE.value()));
+            onEvent.accept(StreamEvent.raceWon(g.raceGroup, winner.id, winnerNode.executorName()));
+            onEvent.accept(StreamEvent.observation(winnerNode.executorName(), winner.result));
+            for (String id : g.nodeIds) {
+                Node n = graph.getNodes().get(id);
+                if (!id.equals(winner.id)) {
+                    synchronized (mu) {
                         graph.setNodeStatus(id, NodeStatus.SKIPPED);
+                        graph.setNodeResult(id, "");
+                        graph.setNodeError(id, "");
                     }
+                    onEvent.accept(StreamEvent.nodeDone(id, n.executorName(), NodeStatus.SKIPPED.value()));
                 }
-            } else {
-                for (String id : g.nodeIds) {
-                    graph.setNodeStatus(id, NodeStatus.FAILED);
-                    if (lastErr != null) {
-                        graph.setNodeError(id, lastErr);
-                        errors.put(id, lastErr);
-                    }
+            }
+        } else {
+            for (String id : g.nodeIds) {
+                RaceAttempt attempt = attempts.get(id);
+                if (attempt == null || attempt.status == NodeStatus.SKIPPED) {
+                    attempt = RaceAttempt.failed(id, "竞速超时（" + cfg.raceTimeoutMs + "ms）");
                 }
+                applyAttempt(attempt);
+                Node n = graph.getNodes().get(id);
+                onEvent.accept(StreamEvent.nodeDone(id, n.executorName(), n.getStatus().value()));
+                onEvent.accept(StreamEvent.observation(n.executorName(), "执行失败: " + n.getError()));
             }
         }
     }
 
     private static class RaceAttempt {
         final String id;
+        final NodeStatus status;
         final String result;
         final String err;
-        RaceAttempt(String id, String result, String err) { this.id = id; this.result = result; this.err = err; }
+        RaceAttempt(String id, NodeStatus status, String result, String err) {
+            this.id = id;
+            this.status = status;
+            this.result = result == null ? "" : result;
+            this.err = err == null ? "" : err;
+        }
+        static RaceAttempt done(String id, String result) {
+            return new RaceAttempt(id, NodeStatus.DONE, result, "");
+        }
+        static RaceAttempt failed(String id, String err) {
+            return new RaceAttempt(id, NodeStatus.FAILED, "", err);
+        }
+        static RaceAttempt cancelled(String id, String err) {
+            return new RaceAttempt(id, NodeStatus.CANCELLED, "", err);
+        }
+        static RaceAttempt skipped(String id, String err) {
+            return new RaceAttempt(id, NodeStatus.SKIPPED, "", err);
+        }
     }
 
     // ─────────────── 单节点执行 ───────────────
 
     private void runSingle(String nodeId) {
-        acquire();
+        boolean acquired = acquire();
+        if (!acquired) {
+            applyAttempt(RaceAttempt.cancelled(nodeId, "等待执行许可时被中断"));
+            return;
+        }
         try {
-            String r = doExecuteNode(nodeId, null);
-            synchronized (mu) {
-                if (r != null) results.put(nodeId, r);
+            RaceAttempt attempt = executeAttempt(nodeId, null);
+            applyAttempt(attempt);
+            Node node = graph.getNodes().get(nodeId);
+            onEvent.accept(StreamEvent.nodeDone(nodeId, node.executorName(), attempt.status.value()));
+            if (attempt.status == NodeStatus.DONE) {
+                onEvent.accept(StreamEvent.observation(node.executorName(), attempt.result));
+            } else if (attempt.status == NodeStatus.FAILED) {
+                onEvent.accept(StreamEvent.observation(node.executorName(), "执行失败: " + attempt.err));
             }
         } finally {
             sem.release();
@@ -325,12 +370,12 @@ public class GraphRuntime {
     }
 
     /**
-     * 真正调用工具的核心：状态机、重试、SSE 事件、错误记录都在这里。
-     * 当 winnerFlag 非 null 时（竞速分支），如果中途其他节点已胜出 → 提前返回 null。
+     * 真正调用工具的核心：状态机、重试和尝试结果都在这里。
+     * 竞速分支只返回尝试结果，由 runRace 唯一负责提交终态，避免出现多个 DONE。
      */
-    private String doExecuteNode(String nodeId, AtomicBoolean winnerFlag) {
+    private RaceAttempt executeAttempt(String nodeId, AtomicBoolean stopFlag) {
         Node node = graph.getNodes().get(nodeId);
-        if (node == null) return null;
+        if (node == null) return RaceAttempt.failed(nodeId, "节点不存在");
         String executor = node.executorName();
         onEvent.accept(StreamEvent.nodeStart(nodeId, executor));
 
@@ -344,20 +389,12 @@ public class GraphRuntime {
         if (node.getType() == NodeType.SUB_AGENT) {
             if (subAgents == null || !subAgents.has(node.getAgentName())) {
                 String msg = "子 Agent " + node.getAgentName() + " 不存在";
-                graph.setNodeStatus(nodeId, NodeStatus.FAILED);
-                graph.setNodeError(nodeId, msg);
-                onEvent.accept(StreamEvent.observation(executor, msg));
-                synchronized (mu) { errors.put(nodeId, msg); }
-                return null;
+                return RaceAttempt.failed(nodeId, msg);
             }
         } else {
             if (tools.get(node.getToolName()) == null) {
                 String msg = "工具 " + node.getToolName() + " 不在允许列表中";
-                graph.setNodeStatus(nodeId, NodeStatus.FAILED);
-                graph.setNodeError(nodeId, msg);
-                onEvent.accept(StreamEvent.observation(executor, msg));
-                synchronized (mu) { errors.put(nodeId, msg); }
-                return null;
+                return RaceAttempt.failed(nodeId, msg);
             }
         }
 
@@ -367,55 +404,48 @@ public class GraphRuntime {
 
         String result = null;
         String lastErr = null;
-        for (int attempt = 0; attempt < maxRetries; attempt++) {
+        int maxAttempts = Math.max(1, maxRetries);
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
             if (cancelled.get()) {
-                graph.setNodeStatus(nodeId, NodeStatus.CANCELLED);
-                lastErr = "被用户中断";
-                break;
+                return RaceAttempt.cancelled(nodeId, "被用户中断");
             }
-            if (winnerFlag != null && winnerFlag.get()) {
+            if (stopFlag != null && stopFlag.get()) {
                 // 竞速：他人胜出 → 不再重试，直接返回让外层标 SKIPPED
-                return null;
+                return RaceAttempt.skipped(nodeId, "竞速取消");
             }
             try {
-                result = invoke(node);
+                result = invokeWithTimeout(node);
+                if (stopFlag != null && stopFlag.get()) {
+                    return RaceAttempt.skipped(nodeId, "竞速取消");
+                }
                 lastErr = null;
                 break;
             } catch (Exception e) {
                 lastErr = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                 graph.setNodeRetryCount(nodeId, attempt + 1);
                 if (cancelled.get()) {
-                    lastErr = "被用户中断";
-                    graph.setNodeStatus(nodeId, NodeStatus.CANCELLED);
-                    break;
+                    return RaceAttempt.cancelled(nodeId, "被用户中断");
                 }
-                if (attempt < maxRetries - 1) {
+                if (stopFlag != null && stopFlag.get()) {
+                    return RaceAttempt.skipped(nodeId, "竞速取消");
+                }
+                if (attempt < maxAttempts - 1) {
                     try { Thread.sleep(retryDelay); }
                     catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
                         // 竞速 / 取消引起的 interrupt → 立即返回
-                        return null;
+                        return stopFlag == null
+                                ? RaceAttempt.cancelled(nodeId, "执行线程被中断")
+                                : RaceAttempt.skipped(nodeId, "竞速取消");
                     }
                 }
             }
         }
 
         if (lastErr != null) {
-            graph.setNodeStatus(nodeId, NodeStatus.FAILED);
-            graph.setNodeError(nodeId, lastErr);
-            synchronized (mu) { errors.put(nodeId, lastErr); }
-            onEvent.accept(StreamEvent.observation(executor, "执行失败: " + lastErr));
-            return null;
+            return RaceAttempt.failed(nodeId, lastErr);
         }
-
-        graph.setNodeStatus(nodeId, NodeStatus.DONE);
-        graph.setNodeResult(nodeId, result == null ? "" : result);
-        onEvent.accept(StreamEvent.nodeDone(nodeId, executor, NodeStatus.DONE.value()));
-        if (winnerFlag == null) {
-            // 普通分支立刻把 observation 推给前端；竞速分支由 runRace 在确认胜出后推送
-            onEvent.accept(StreamEvent.observation(executor, result == null ? "" : result));
-        }
-        return result == null ? "" : result;
+        return RaceAttempt.done(nodeId, result);
     }
 
     // ─────────────── 辅助方法 ───────────────
@@ -430,8 +460,54 @@ public class GraphRuntime {
         }
         Tool t = tools.get(node.getToolName());
         Map<String, Object> params = new HashMap<>();
-        if (node.getParams() != null) node.getParams().forEach(params::put);
+        if (node.getParams() != null) {
+            node.getParams().forEach((key, value) -> params.put(key, resolveParamValue(node, value)));
+        }
         return t.getExecute().apply(params);
+    }
+
+    /** 解析 Planner 在工具参数中声明的 {{n1.result}} / {{query}} 占位符。 */
+    private String resolveParamValue(Node node, String value) {
+        if (value == null || value.isEmpty()) return value == null ? "" : value;
+        String resolved = value.replace("{{query}}", taskQuery);
+        if (node.getDependsOn() == null) return resolved;
+        for (String depId : node.getDependsOn()) {
+            Node dep = graph.getNodes().get(depId);
+            Node source = successfulDependency(dep);
+            String depResult = source == null || source.getResult() == null ? "" : source.getResult();
+            resolved = resolved.replace("{{" + depId + ".result}}", depResult);
+        }
+        return resolved;
+    }
+
+    /**
+     * 对单次工具/子 Agent 调用应用 step-timeout-ms。FutureTask 在线程被取消后不会再把
+     * 迟到结果提交给图；底层执行体仍应正确响应 interrupt，才能同时停止其外部副作用。
+     */
+    private String invokeWithTimeout(Node node) throws Exception {
+        AppConfig.HarnessConfig h = appCfg.getHarness();
+        int timeoutMs = h == null ? 5000 : h.getStepTimeoutMs();
+        if (timeoutMs <= 0) return invoke(node);
+
+        FutureTask<String> task = new FutureTask<>(() -> invoke(node));
+        Thread worker = new Thread(task, "graph-invoke-" + node.getId());
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            return task.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            task.cancel(true);
+            throw new RuntimeException("执行超时（" + timeoutMs + "ms）");
+        } catch (InterruptedException e) {
+            task.cancel(true);
+            Thread.currentThread().interrupt();
+            throw e;
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception ex) throw ex;
+            if (cause instanceof Error err) throw err;
+            throw new RuntimeException(cause);
+        }
     }
 
     /** 取所有 depends_on 节点的 result，key = "<nodeId>:<executor-name>"，便于子 Agent 识别。 */
@@ -439,19 +515,115 @@ public class GraphRuntime {
         Map<String, String> out = new LinkedHashMap<>();
         if (node.getDependsOn() == null) return out;
         // 按 depId 排序，输出稳定（doc_agent 依赖该顺序定位 writer/review）
+        java.util.Set<String> emitted = new java.util.HashSet<>();
         for (String depId : new TreeSet<>(node.getDependsOn())) {
             Node dep = graph.getNodes().get(depId);
-            if (dep == null || dep.getResult() == null || dep.getResult().isEmpty()) continue;
-            String exec = dep.executorName();
-            String key = exec.isEmpty() ? depId : depId + ":" + exec;
-            out.put(key, dep.getResult());
+            Node source = successfulDependency(dep);
+            if (source == null || source.getResult() == null || source.getResult().isEmpty()
+                    || !emitted.add(source.getId())) continue;
+            String exec = source.executorName();
+            String key = exec.isEmpty() ? source.getId() : source.getId() + ":" + exec;
+            out.put(key, source.getResult());
         }
         return out;
     }
 
-    private void acquire() {
-        try { sem.acquire(); } catch (InterruptedException e) {
+    /** 只有所有直接依赖都成功时才允许调度当前节点。 */
+    private boolean dependenciesSucceeded(String nodeId) {
+        Node node = graph.getNodes().get(nodeId);
+        if (node == null || node.getDependsOn() == null) return true;
+        for (String depId : node.getDependsOn()) {
+            Node dep = graph.getNodes().get(depId);
+            if (successfulDependency(dep) == null) return false;
+        }
+        return true;
+    }
+
+    /** 竞速落败节点由同组胜者代偿，因此仍可满足下游依赖。 */
+    private Node successfulDependency(Node dep) {
+        if (dep == null) return null;
+        if (dep.getStatus() == NodeStatus.DONE) return dep;
+        if (dep.getStatus() != NodeStatus.SKIPPED || dep.getRaceGroup() == null
+                || dep.getRaceGroup().isEmpty()) return null;
+        for (Node candidate : graph.getNodes().values()) {
+            if (candidate.getStatus() == NodeStatus.DONE
+                    && dep.getRaceGroup().equals(candidate.getRaceGroup())) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private void skipForFailedDependencies(String nodeId) {
+        Node node = graph.getNodes().get(nodeId);
+        if (node == null) return;
+        List<String> failed = new ArrayList<>();
+        for (String depId : node.getDependsOn()) {
+            Node dep = graph.getNodes().get(depId);
+            if (dep == null) {
+                failed.add(depId + "(missing)");
+            } else if (successfulDependency(dep) == null) {
+                failed.add(depId + "(" + dep.getStatus().value() + ")");
+            }
+        }
+        String msg = "上游依赖未成功: " + String.join(", ", failed);
+        synchronized (mu) {
+            graph.setNodeStatus(nodeId, NodeStatus.SKIPPED);
+            graph.setNodeError(nodeId, msg);
+            errors.put(nodeId, msg);
+        }
+        onEvent.accept(StreamEvent.nodeDone(nodeId, node.executorName(), NodeStatus.SKIPPED.value()));
+        onEvent.accept(StreamEvent.observation(node.executorName(), msg));
+    }
+
+    /** 把一次执行尝试原子地提交到图，竞速线程本身不直接提交终态。 */
+    private void applyAttempt(RaceAttempt attempt) {
+        if (attempt == null) return;
+        synchronized (mu) {
+            graph.setNodeStatus(attempt.id, attempt.status);
+            if (attempt.status == NodeStatus.DONE) {
+                graph.setNodeResult(attempt.id, attempt.result);
+                graph.setNodeError(attempt.id, "");
+                results.put(attempt.id, attempt.result);
+                errors.remove(attempt.id);
+            } else {
+                graph.setNodeResult(attempt.id, "");
+                graph.setNodeError(attempt.id, attempt.err);
+                results.remove(attempt.id);
+                if (!attempt.err.isEmpty()) errors.put(attempt.id, attempt.err);
+            }
+        }
+    }
+
+    private static void interruptRaceLosers(Map<String, Thread> threads, String winnerId) {
+        for (Map.Entry<String, Thread> e : threads.entrySet()) {
+            if (winnerId == null || !e.getKey().equals(winnerId)) e.getValue().interrupt();
+        }
+    }
+
+    /** 短暂回收协作式响应中断的竞速线程；不让不响应中断的工具阻塞整张图。 */
+    private static void joinRaceThreads(Map<String, Thread> threads, long maxWaitMs) {
+        long deadline = System.currentTimeMillis() + Math.max(0, maxWaitMs);
+        for (Thread t : threads.values()) {
+            long left = deadline - System.currentTimeMillis();
+            if (left <= 0) return;
+            try {
+                t.join(left);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    /** 返回是否真正取得许可，避免中断后仍执行并在 finally 中错误释放许可。 */
+    private boolean acquire() {
+        try {
+            sem.acquire();
+            return true;
+        } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -463,15 +635,9 @@ public class GraphRuntime {
         return 0;
     }
 
-    private String errorOf(String nodeId) {
-        synchronized (mu) {
-            return errors.getOrDefault(nodeId, "未知错误");
-        }
-    }
-
     private GraphResult buildResult() {
         GraphResult r = new GraphResult();
-        r.observations = graph.successfulResults();
+        r.observations = graph.executionSummaries();
         for (Map.Entry<String, Node> e : graph.getNodes().entrySet()) {
             Node n = e.getValue();
             r.nodeResults.put(e.getKey(), new NodeResult(n.getStatus(), n.getResult(), n.getError()));

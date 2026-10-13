@@ -149,6 +149,25 @@ public class TaskGraph {
         return results;
     }
 
+    /**
+     * 供最终答案生成器使用的执行摘要。成功结果与真实失败都会进入上下文，
+     * 竞速落败节点不重复输出；因上游失败跳过的节点则保留原因。
+     */
+    public List<String> executionSummaries() {
+        List<String> summaries = new ArrayList<>();
+        for (Node n : nodes.values()) {
+            String prefix = "[" + n.executorName() + "] ";
+            if (n.getStatus() == NodeStatus.DONE && n.getResult() != null && !n.getResult().isEmpty()) {
+                summaries.add(prefix + n.getResult());
+            } else if (n.getStatus() == NodeStatus.FAILED && n.getError() != null && !n.getError().isEmpty()) {
+                summaries.add(prefix + "执行失败: " + n.getError());
+            } else if (n.getStatus() == NodeStatus.SKIPPED && n.getError() != null && !n.getError().isEmpty()) {
+                summaries.add(prefix + "已跳过: " + n.getError());
+            }
+        }
+        return summaries;
+    }
+
     /** 调试用文本摘要。 */
     public String summary() {
         StringBuilder b = new StringBuilder();

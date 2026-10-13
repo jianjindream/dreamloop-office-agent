@@ -172,7 +172,8 @@ public class ReActLoop {
             case FAILED -> TaskStep.FAILED;
             case RUNNING -> TaskStep.RUNNING;
             case CANCELLED -> TaskStep.INTERRUPTED;
-            case SKIPPED, PENDING -> TaskStep.PENDING;
+            case SKIPPED -> TaskStep.SKIPPED;
+            case PENDING -> TaskStep.PENDING;
         };
     }
 
