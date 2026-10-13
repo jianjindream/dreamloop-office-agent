@@ -10,9 +10,11 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class DockerSandbox implements Executor {
@@ -23,8 +25,12 @@ public class DockerSandbox implements Executor {
     private final boolean available;
 
     public DockerSandbox(AppConfig.SandboxConfig cfg) {
+        this(cfg, null);
+    }
+
+    DockerSandbox(AppConfig.SandboxConfig cfg, Boolean availabilityOverride) {
         this.cfg = cfg;
-        this.available = probe();
+        this.available = availabilityOverride != null ? availabilityOverride : probe();
     }
 
     @Override public String backend() { return "docker"; }
@@ -66,7 +72,8 @@ public class DockerSandbox implements Executor {
             timeout = Duration.ofSeconds(30);
         }
 
-        List<String> args = buildDockerArgs(req.getCommand());
+        String containerName = "agi-sandbox-" + UUID.randomUUID().toString().replace("-", "");
+        List<String> args = buildDockerArgs(req.getCommand(), containerName);
         ProcessBuilder pb = new ProcessBuilder(args);
 
         try {
@@ -84,11 +91,13 @@ public class DockerSandbox implements Executor {
 
             if (!finished) {
                 proc.destroyForcibly();
+                forceRemoveContainer(containerName);
                 tOut.join(500);
                 tErr.join(500);
-                result.setStdout(stdoutBuf.toString());
-                result.setStderr(appendIfMissing(stderrBuf.toString(),
+                result.setStdout(stdoutBuf.toString(StandardCharsets.UTF_8));
+                result.setStderr(appendIfMissing(stderrBuf.toString(StandardCharsets.UTF_8),
                         "\n[超时] 执行超过 " + timeout + " 被强制终止"));
+                result.setTruncated(maxOut > 0 && (stdoutBuf.size() >= maxOut || stderrBuf.size() >= maxOut));
                 result.setKilled(true);
                 result.setExitCode(-4);
                 return result;
@@ -96,8 +105,8 @@ public class DockerSandbox implements Executor {
             tOut.join();
             tErr.join();
 
-            result.setStdout(stdoutBuf.toString());
-            result.setStderr(stderrBuf.toString());
+            result.setStdout(stdoutBuf.toString(StandardCharsets.UTF_8));
+            result.setStderr(stderrBuf.toString(StandardCharsets.UTF_8));
             result.setExitCode(proc.exitValue());
 
             if (maxOut > 0 && (stdoutBuf.size() >= maxOut || stderrBuf.size() >= maxOut)) {
@@ -106,6 +115,7 @@ public class DockerSandbox implements Executor {
             return result;
         } catch (Exception e) {
             log.warn("Docker exec 失败: {}", e.getMessage());
+            forceRemoveContainer(containerName);
             result.setExitCode(-5);
             result.setStderr(result.getStderr() + "\n[沙箱内部错误] " + e.getMessage());
             result.setDurationMs(System.currentTimeMillis() - start);
@@ -113,16 +123,27 @@ public class DockerSandbox implements Executor {
         }
     }
 
-    private List<String> buildDockerArgs(String command) {
+    List<String> buildDockerArgs(String command, String containerName) {
         List<String> args = new ArrayList<>();
         args.add("docker");
         args.add("run");
         args.add("--rm");
-        args.add("-i");
+        args.add("--name");
+        args.add(containerName);
+        args.add("--pull");
+        args.add("never");
         args.add("--security-opt");
         args.add("no-new-privileges");
         args.add("--cap-drop");
         args.add("ALL");
+        args.add("--user");
+        args.add("65534:65534");
+        args.add("--workdir");
+        args.add("/tmp");
+        args.add("--ipc");
+        args.add("none");
+        args.add("--ulimit");
+        args.add("nofile=256:256");
         if (cfg.isNetworkDisabled()) {
             args.add("--network");
             args.add("none");
@@ -130,10 +151,12 @@ public class DockerSandbox implements Executor {
         if (cfg.isReadonlyRootfs()) {
             args.add("--read-only");
             args.add("--tmpfs");
-            args.add("/tmp:rw,size=64m");
+            args.add("/tmp:rw,noexec,nosuid,size=64m,mode=1777");
         }
         if (cfg.getMemoryLimitMb() > 0) {
             args.add("--memory");
+            args.add(cfg.getMemoryLimitMb() + "m");
+            args.add("--memory-swap");
             args.add(cfg.getMemoryLimitMb() + "m");
         }
         if (cfg.getCpuPercent() > 0) {
@@ -151,6 +174,18 @@ public class DockerSandbox implements Executor {
         args.add("-c");
         args.add(command);
         return args;
+    }
+
+    private void forceRemoveContainer(String containerName) {
+        try {
+            Process cleanup = new ProcessBuilder("docker", "rm", "-f", containerName)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (!cleanup.waitFor(5, TimeUnit.SECONDS)) cleanup.destroyForcibly();
+        } catch (Exception e) {
+            log.warn("清理超时沙箱容器 {} 失败: {}", containerName, e.getMessage());
+        }
     }
 
     static Thread pumpStream(InputStream in, OutputStream out, int max) {

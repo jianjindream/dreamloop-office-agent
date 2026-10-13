@@ -7,6 +7,8 @@ import com.jianjin.assistant.domain.sandbox.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
+
 public final class SandboxFactory {
 
     private static final Logger log = LoggerFactory.getLogger(SandboxFactory.class);
@@ -21,20 +23,14 @@ public final class SandboxFactory {
         switch (backend == null ? "" : backend) {
             case "docker" -> {
                 DockerSandbox ds = new DockerSandbox(sandboxCfg);
-                if (ds.available()) {
-                    exec = ds;
-                } else {
-                    log.warn("Docker 不可用，沙箱降级到 mock 模式");
-                    exec = new MockSandbox();
-                }
+                if (!ds.available()) log.error("Docker 不可用；沙箱将失败关闭，不会模拟执行命令");
+                exec = ds;
             }
-            case "local" -> exec = new LocalSandbox(sandboxCfg);
+            case "local" -> exec = new LocalSandbox(sandboxCfg, secCfg);
             case "mock" -> exec = new MockSandbox();
-            default -> {
-                log.warn("未知沙箱后端 {}，使用 mock", backend);
-                exec = new MockSandbox();
-            }
+            default -> throw new IllegalArgumentException("未知沙箱后端: " + backend);
         }
-        return new Sandbox(validator, exec);
+        return new Sandbox(validator, exec,
+                Duration.ofSeconds(Math.max(1, secCfg.getConfirmationTtlSeconds())));
     }
 }

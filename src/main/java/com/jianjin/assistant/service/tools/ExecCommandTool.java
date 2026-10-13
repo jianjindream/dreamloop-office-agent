@@ -6,7 +6,6 @@ import com.jianjin.assistant.domain.sandbox.ExecRequest;
 import com.jianjin.assistant.domain.sandbox.ExecResult;
 import com.jianjin.assistant.domain.sandbox.Sandbox;
 
-import java.time.Duration;
 import java.util.List;
 
 public final class ExecCommandTool {
@@ -16,12 +15,13 @@ public final class ExecCommandTool {
     public static Tool create(Sandbox sandbox) {
         Tool tool = new Tool();
         tool.setName("exec_command");
-        tool.setDescription("在隔离沙箱中执行终端命令。支持 ls/cat/echo/python3/node 等常见操作；"
+        tool.setDescription("在隔离沙箱中执行终端命令，可用命令取决于配置的沙箱镜像；"
                 + "危险命令（rm -rf、sudo、网络外联等）会被自动拒绝；"
-                + "涉及删除/安装/管道等中等风险命令需通过 confirm=true 二次确认。");
+                + "涉及删除/安装/管道等中等风险命令必须先取得确认令牌，并在用户明确确认后再次调用。");
         tool.setParameters(List.of(
-                new ToolParam("command", "string", "要执行的 Shell 命令（单条，禁止命令链）", true),
-                new ToolParam("confirm", "boolean", "对 warn 级命令的二次确认；默认 false", false)
+                new ToolParam("command", "string", "要执行的 Shell 命令", true),
+                new ToolParam("confirm", "boolean", "用户已明确确认 warn 级命令；默认 false", false),
+                new ToolParam("confirmation_token", "string", "首次 warn 响应签发的单次确认令牌", false)
         ));
         tool.setExecute(params -> {
             Object cmdObj = params.get("command");
@@ -34,7 +34,9 @@ public final class ExecCommandTool {
             if (cv instanceof Boolean b) confirm = b;
             else if (cv instanceof String s) confirm = "true".equalsIgnoreCase(s) || "1".equals(s);
 
-            ExecRequest req = new ExecRequest(cmdStr, Duration.ofSeconds(60), confirm);
+            ExecRequest req = new ExecRequest(cmdStr, null, confirm);
+            Object token = params.get("confirmation_token");
+            if (token != null) req.setConfirmationToken(token.toString());
             ExecResult result = sandbox.exec(req);
             return formatExecResult(result);
         });
@@ -54,7 +56,8 @@ public final class ExecCommandTool {
                     if (r.getExitCode() == -2) {
                         sb.append("⚠️ **命令需要确认**\n触发规则：")
                                 .append(String.join("、", r.getValidation().getViolations()))
-                                .append("\n如确认无误，请在调用参数中加入 `confirm=true` 后重新执行。\n");
+                                .append("\n请先向用户展示风险；仅在用户明确确认后，使用 `confirm=true` 和以下单次令牌重新执行：\n`")
+                                .append(r.getConfirmationToken()).append("`\n");
                         return sb.toString();
                     }
                     sb.append("⚠️ 警告级命令已执行（触发规则：")

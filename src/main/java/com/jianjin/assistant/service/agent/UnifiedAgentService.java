@@ -47,14 +47,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * UnifiedAgentService —— 已经从 854 行的上帝类拆分为多个 application/chat 协作类。
@@ -84,6 +87,10 @@ public class UnifiedAgentService {
 
     private static final Logger log = LoggerFactory.getLogger(UnifiedAgentService.class);
     private static final ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+    private static final Pattern SECRET_OPTION = Pattern.compile(
+            "(?i)(--?(?:password|passwd|token|api[-_]?key|secret)(?:=|\\s+))(\"[^\"]*\"|'[^']*'|[^\\s]+)");
+    private static final Pattern SECRET_ENV = Pattern.compile(
+            "(?i)\\b([A-Z0-9_]*(?:PASSWORD|PASSWD|TOKEN|API_KEY|SECRET)[A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\\s]+)");
 
     private final AppConfig cfg;
     private final LlmService llm;
@@ -199,6 +206,7 @@ public class UnifiedAgentService {
 
     @PreDestroy
     public void shutdown() {
+        if (sandbox != null) sandbox.close();
         if (kg != null) kg.close();
     }
 
@@ -229,7 +237,9 @@ public class UnifiedAgentService {
     private void auditSandboxResult(ExecResult r) {
         try {
             Map<String, Object> event = new LinkedHashMap<>();
-            event.put("command", r.getCommand());
+            event.put("event_id", UUID.randomUUID().toString());
+            event.put("occurred_at", Instant.now().toString());
+            event.put("command", redactCommand(r.getCommand()));
             if (r.getValidation() != null) {
                 event.put("level", r.getValidation().getLevel().value());
                 event.put("reason", r.getValidation().getReason());
@@ -241,7 +251,15 @@ public class UnifiedAgentService {
             event.put("killed", r.isKilled());
             event.put("truncated", r.isTruncated());
             infra.publishEvent("sandbox.exec", mapper.writeValueAsString(event));
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            log.warn("构造沙箱审计事件失败: {}", e.getMessage());
+        }
+    }
+
+    static String redactCommand(String command) {
+        if (command == null) return null;
+        String redacted = SECRET_OPTION.matcher(command).replaceAll("$1***");
+        return SECRET_ENV.matcher(redacted).replaceAll("$1=***");
     }
 
     // ===== Public API =====

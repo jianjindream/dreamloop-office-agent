@@ -115,6 +115,7 @@ app:
   # ===== 命令安全校验 =====
   security:
     max-command-length: 500
+    confirmation-ttl-seconds: 300
     allowlist-mode: false
     allow-private-mcp-endpoints: false
     allowlist:

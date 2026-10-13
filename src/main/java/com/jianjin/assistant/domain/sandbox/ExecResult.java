@@ -18,6 +18,8 @@ public class ExecResult {
     private boolean killed;
     private String backend;
     private boolean truncated;
+    @JsonProperty("confirmation_token")
+    private String confirmationToken;
 
     public ExecResult() {}
 
@@ -40,4 +42,6 @@ public class ExecResult {
     public void setBackend(String backend) { this.backend = backend; }
     public boolean isTruncated() { return truncated; }
     public void setTruncated(boolean truncated) { this.truncated = truncated; }
+    public String getConfirmationToken() { return confirmationToken; }
+    public void setConfirmationToken(String confirmationToken) { this.confirmationToken = confirmationToken; }
 }

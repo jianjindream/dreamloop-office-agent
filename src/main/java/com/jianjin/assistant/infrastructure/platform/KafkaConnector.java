@@ -27,6 +27,7 @@ public class KafkaConnector {
 
     @PostConstruct
     public void init() {
+        KafkaProducer<String, String> candidate = null;
         try {
             Properties props = new Properties();
             props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, cfg.getKafka().getBrokers());
@@ -37,17 +38,21 @@ public class KafkaConnector {
             props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "3000");
             props.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "3000");
             props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "5000");
-            KafkaProducer<String, String> p = new KafkaProducer<>(props);
-            p.partitionsFor(cfg.getKafka().getTopic());
-            producer = p;
+            props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
+            props.put(ProducerConfig.ACKS_CONFIG, "all");
+            candidate = new KafkaProducer<>(props);
+            candidate.partitionsFor(cfg.getKafka().getTopic());
+            producer = candidate;
+            candidate = null;
             status = "connected";
             log.info("Kafka 已连接: {}", cfg.getKafka().getBrokers());
         } catch (Exception e) {
             log.warn("Kafka 连接失败: {} (事件将输出到日志)", e.getMessage());
             status = "disconnected";
-            if (producer != null) {
-                try { producer.close(); } catch (Exception ignored) {}
-                producer = null;
+            producer = null;
+        } finally {
+            if (candidate != null) {
+                try { candidate.close(); } catch (Exception ignored) {}
             }
         }
     }
@@ -60,9 +65,17 @@ public class KafkaConnector {
     public void publish(String eventType, String payload) {
         if (available()) {
             try {
-                producer.send(new ProducerRecord<>(cfg.getKafka().getTopic(), eventType, payload));
+                producer.send(new ProducerRecord<>(cfg.getKafka().getTopic(), eventType, payload),
+                        (metadata, error) -> {
+                            if (error != null) {
+                                log.warn("Kafka 异步写入失败: topic={}, type={}, cause={}",
+                                        cfg.getKafka().getTopic(), eventType, error.getMessage());
+                                log.info("[Kafka-fallback] {}: {}", eventType, payload);
+                            }
+                        });
             } catch (Exception e) {
                 log.warn("Kafka 写入失败: {}", e.getMessage());
+                log.info("[Kafka-fallback] {}: {}", eventType, payload);
             }
         } else {
             log.info("[Kafka-fallback] {}: {}", eventType, payload);

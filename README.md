@@ -150,6 +150,7 @@ docker compose up -d --build
 | `app.memory.short-term-max-turns` | `10` | 短期记忆最大轮数 |
 | `app.harness.max-iterations` | `5` | ReAct 最大迭代数 |
 | `app.sandbox.backend` | `docker` | `docker`、`local` 或 `mock` |
+| `app.security.confirmation-ttl-seconds` | `300` | Warn 命令单次确认令牌的有效期（秒） |
 | `app.neo4j.enabled` | `true` | 是否尝试启用知识图谱 |
 
 外部服务的默认开发端口：
@@ -340,7 +341,9 @@ Docker 镜像包含 Vue 前端和 Spring Boot 后端。前端单元测试运行 
 | `rag_search` | 查询已导入的个人知识库 |
 | `exec_command` | 在配置的 Docker、Local 或 Mock 沙箱中执行经过校验的单条命令 |
 
-`exec_command` 默认使用 Docker 后端，并限制超时、输出大小、内存、CPU、PID、网络与只读根文件系统。使用 `local` 后端会直接在应用所在机器执行通过校验的命令，只应在可信开发环境中开启。
+`exec_command` 默认使用 Docker 后端，并限制超时、输出大小、内存、CPU、PID、网络与只读根文件系统。Warn 级命令先返回一个与原命令绑定、短时有效且只能使用一次的确认令牌；用户明确确认后，第二次调用必须同时提交 `confirm=true` 和该令牌。Docker 不可用时执行会失败关闭，不会伪装成成功；`mock` 仅在显式配置时启用。使用 `local` 后端会直接在应用所在机器执行通过校验的 Safe 命令，只应在可信开发环境中开启。
+
+应用在宿主机运行时可直接调用宿主机 Docker。若应用本身运行在容器中，默认镜像未持有 Docker daemon 权限，因此 Docker 沙箱会失败关闭；生产部署应使用独立沙箱执行节点，不建议把宿主机 Docker socket 直接挂载给应用容器。
 
 ## 生产使用前须知
 

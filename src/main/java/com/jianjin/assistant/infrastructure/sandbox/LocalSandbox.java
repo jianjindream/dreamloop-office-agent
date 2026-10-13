@@ -23,11 +23,9 @@ public class LocalSandbox implements Executor {
     private final AppConfig.SandboxConfig cfg;
     private final Validator validator;
 
-    public LocalSandbox(AppConfig.SandboxConfig cfg) {
+    public LocalSandbox(AppConfig.SandboxConfig cfg, AppConfig.SecurityConfig securityCfg) {
         this.cfg = cfg;
-        AppConfig.SecurityConfig sec = new AppConfig.SecurityConfig();
-        sec.setMaxCommandLength(cfg.getMaxOutputBytes() > 0 ? cfg.getMaxOutputBytes() : 500);
-        this.validator = new Validator(sec);
+        this.validator = new Validator(securityCfg);
     }
 
     @Override public String backend() { return "local"; }

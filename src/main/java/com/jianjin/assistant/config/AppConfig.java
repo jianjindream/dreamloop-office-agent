@@ -371,12 +371,15 @@ public class AppConfig {
 
     public static class SecurityConfig {
         private int maxCommandLength = 500;
+        private int confirmationTtlSeconds = 300;
         private boolean allowlistMode = false;
         private List<String> allowlist = new ArrayList<>();
         private boolean allowPrivateMcpEndpoints = false;
 
         public int getMaxCommandLength() { return maxCommandLength; }
         public void setMaxCommandLength(int maxCommandLength) { this.maxCommandLength = maxCommandLength; }
+        public int getConfirmationTtlSeconds() { return confirmationTtlSeconds; }
+        public void setConfirmationTtlSeconds(int confirmationTtlSeconds) { this.confirmationTtlSeconds = confirmationTtlSeconds; }
         public boolean isAllowlistMode() { return allowlistMode; }
         public void setAllowlistMode(boolean allowlistMode) { this.allowlistMode = allowlistMode; }
         public List<String> getAllowlist() { return allowlist; }
