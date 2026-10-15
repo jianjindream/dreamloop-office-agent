@@ -7,10 +7,62 @@ import org.junit.jupiter.api.Test;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class LongTermMemoryTest {
+
+    @Test
+    void consolidationTriggersAfterTenNewMemoriesByDefault() {
+        LongTermMemory memory = new LongTermMemory();
+        memory.setConsolidationConfig(new AppConfig.ConsolidationConfig());
+
+        for (int i = 0; i < 9; i++) memory.store("memory-" + i, 0.5, null);
+        assertFalse(memory.needConsolidation());
+
+        memory.store("memory-9", 0.5, null);
+        assertTrue(memory.needConsolidation());
+    }
+
+    @Test
+    void onlyExplicitlyMarkedRecallUpdatesUsageAndRestoresRecency() {
+        LongTermMemory memory = configuredMemory();
+        MemoryItem item = item(7, "项目使用 JDK 17", 0.5, List.of(1.0, 0.0),
+                "general", List.of("java"), null);
+        item.setCreatedAt(LocalDateTime.now().minusDays(90));
+        item.setLastAccessed(item.getCreatedAt());
+        memory.storeItem(item);
+        AtomicInteger persistedId = new AtomicInteger(-1);
+        memory.setRecallListener((id, importance, recallCount, lastRecalledAt) -> persistedId.set(id));
+
+        List<MemoryItem> candidates = memory.recall("JDK", 3, List.of(1.0, 0.0));
+
+        assertEquals(1, candidates.size());
+        assertEquals(0, item.getRecallCount(), "仅成为候选不应计为实际召回");
+        assertEquals(0.25, item.getImportance(), 0.02, "90 天未使用的 general 记忆应衰减约一半");
+
+        memory.markRecalled(7);
+
+        assertEquals(1, item.getRecallCount());
+        assertNotNull(item.getLastRecalledAt());
+        assertTrue(item.getImportance() > 0.5, "实际召回后应恢复时效并获得对数奖励");
+        assertEquals(7, persistedId.get());
+    }
+
+    @Test
+    void identityAndPolicyDoNotDecayWithAge() {
+        LongTermMemory memory = configuredMemory();
+        MemoryItem identity = item(1, "用户姓名：小林", 0.9, List.of(1.0, 0.0),
+                "identity", List.of(), "Profile");
+        identity.setCreatedAt(LocalDateTime.now().minusDays(1000));
+        identity.setLastAccessed(identity.getCreatedAt());
+        memory.storeItem(identity);
+
+        memory.recall("姓名", 1, List.of(1.0, 0.0));
+
+        assertEquals(0.9, identity.getImportance(), 0.0001);
+    }
 
     @Test
     void consolidationKeepsProtectedItemsInMemory() {

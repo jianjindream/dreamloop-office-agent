@@ -61,11 +61,17 @@ public class MemorySpaceManager {
         for (InfrastructureService.LongTermRow row : infra.loadLongTermItems(userId)) {
             MemoryItem item = new MemoryItem();
             item.setId(row.id); item.setContent(row.content); item.setImportance(row.importance); item.setEmbedding(row.embedding);
+            item.setBaseImportance(row.baseImportance > 0 ? row.baseImportance : row.importance);
             if (row.createdAt != null) item.setCreatedAt(row.createdAt.toLocalDateTime());
             if (row.lastAccessed != null) item.setLastAccessed(row.lastAccessed.toLocalDateTime());
+            item.setRecallCount(row.recallCount);
+            if (row.lastRecalledAt != null) item.setLastRecalledAt(row.lastRecalledAt.toLocalDateTime());
             item.setCategory(row.category); item.setTags(row.tags); item.setSlotHint(row.slotHint);
             ltm.storeItem(item);
         }
+        ltm.setRecallListener((itemId, effectiveImportance, recallCount, lastRecalledAt) -> executor.execute(
+                () -> infra.recordLongTermRecall(userId, itemId, effectiveImportance, recallCount,
+                        lastRecalledAt == null ? null : java.sql.Timestamp.valueOf(lastRecalledAt))));
         UserMemorySpace space = new UserMemorySpace(pref, ltm);
         KGStore graphStore = kg;
         if (graphStore != null) {

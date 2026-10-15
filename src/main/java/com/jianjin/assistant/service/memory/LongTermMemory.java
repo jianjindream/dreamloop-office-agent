@@ -11,15 +11,26 @@ import java.util.*;
 @Component
 public class LongTermMemory {
 
+    @FunctionalInterface
+    public interface RecallListener {
+        void onRecalled(int itemId, double effectiveImportance, int recallCount, LocalDateTime lastRecalledAt);
+    }
+
     private final List<MemoryItem> items = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, Integer> vocabId = new HashMap<>();
     private final List<String> vocab = new ArrayList<>();
     private int nextId = 0;
     private int storeCount = 0;
     private AppConfig.ConsolidationConfig consolidationCfg;
+    private RecallListener recallListener = (itemId, effectiveImportance, recallCount, lastRecalledAt) -> { };
 
     public void setConsolidationConfig(AppConfig.ConsolidationConfig cfg) {
         this.consolidationCfg = cfg;
+    }
+
+    public void setRecallListener(RecallListener listener) {
+        this.recallListener = listener == null
+                ? (itemId, effectiveImportance, recallCount, lastRecalledAt) -> { } : listener;
     }
 
     public synchronized List<MemoryItem> getItems() { return new ArrayList<>(items); }
@@ -60,9 +71,11 @@ public class LongTermMemory {
                 if (item.getEmbedding() != null && item.getEmbedding().size() == embedding.size()) {
                     double sim = cosine(embedding, item.getEmbedding());
                     if (sim >= consolidationCfg.getDedupThreshold()) {
-                        if (importance > item.getImportance()) {
-                            item.setImportance(importance);
+                        ensureBaseImportance(item);
+                        if (importance > item.getBaseImportance()) {
+                            item.setBaseImportance(importance);
                         }
+                        item.setImportance(Math.max(item.getImportance(), importance));
                         // 命中重复时若分类更具体（非 general），允许覆盖
                         if (category != null && !category.isEmpty()
                                 && !"general".equals(category)
@@ -101,6 +114,7 @@ public class LongTermMemory {
         if (item.getId() >= nextId) nextId = item.getId() + 1;
         if (item.getCreatedAt() == null) item.setCreatedAt(LocalDateTime.now());
         if (item.getLastAccessed() == null) item.setLastAccessed(item.getCreatedAt());
+        ensureBaseImportance(item);
         items.add(item);
     }
 
@@ -127,13 +141,35 @@ public class LongTermMemory {
 
     // --- Recall ---
 
+    /** Counts only memories that survived all filters and were actually injected into the prompt. */
+    public void markRecalled(int itemId) {
+        double effective;
+        int recallCount;
+        LocalDateTime lastRecalledAt;
+        synchronized (this) {
+            MemoryItem item = getItemById(itemId);
+            if (item == null) return;
+            LocalDateTime now = LocalDateTime.now();
+            item.setRecallCount(item.getRecallCount() + 1);
+            item.setLastRecalledAt(now);
+            item.setLastAccessed(now);
+            item.setImportance(effectiveImportance(item, now));
+            effective = item.getImportance();
+            recallCount = item.getRecallCount();
+            lastRecalledAt = item.getLastRecalledAt();
+        }
+        recallListener.onRecalled(itemId, effective, recallCount, lastRecalledAt);
+    }
+
     public synchronized List<MemoryItem> recall(String query, int topK, List<Double> queryEmbedding) {
         if (items.isEmpty()) return Collections.emptyList();
         final double threshold = 0.4;
+        final LocalDateTime now = LocalDateTime.now();
 
         List<double[]> scored = new ArrayList<>();
         for (int i = 0; i < items.size(); i++) {
             MemoryItem item = items.get(i);
+            item.setImportance(effectiveImportance(item, now));
             double sim;
             if (queryEmbedding != null && !queryEmbedding.isEmpty()
                     && item.getEmbedding() != null && item.getEmbedding().size() == queryEmbedding.size()) {
@@ -146,7 +182,6 @@ public class LongTermMemory {
             }
             double s = sim * 0.7 + item.getImportance() * 0.3;
             if (s >= threshold) {
-                item.setLastAccessed(LocalDateTime.now());
                 scored.add(new double[]{i, s});
             }
         }
@@ -173,6 +208,7 @@ public class LongTermMemory {
         List<double[]> scored = new ArrayList<>();
         for (int i = 0; i < items.size(); i++) {
             MemoryItem item = items.get(i);
+            item.setImportance(effectiveImportance(item, now));
 
             // category 过滤
             if (filter.categories != null && !filter.categories.isEmpty()) {
@@ -207,7 +243,6 @@ public class LongTermMemory {
             }
             double s = sim * 0.7 + item.getImportance() * 0.3;
             if (s >= threshold) {
-                item.setLastAccessed(now);
                 scored.add(new double[]{i, s});
             }
         }
@@ -241,10 +276,11 @@ public class LongTermMemory {
         storeCount = 0;
         Set<Integer> removed = new HashSet<>();
 
-        // Phase 1: Decay
+        LocalDateTime now = LocalDateTime.now();
+
+        // Phase 1: Recalculate from immutable base importance and actual recall usage.
         for (MemoryItem item : items) {
-            double days = ChronoUnit.HOURS.between(item.getCreatedAt(), LocalDateTime.now()) / 24.0;
-            item.setImportance(item.getImportance() * Math.pow(consolidationCfg.getDecayRate(), days));
+            item.setImportance(effectiveImportance(item, now));
         }
 
         // Phase 2: Dedup + Merge
@@ -295,13 +331,15 @@ public class LongTermMemory {
         for (int i = 0; i < items.size(); i++) {
             if (removed.contains(i)) continue;
             if (protectedSet.contains(items.get(i).getId())) continue;
-            double days = ChronoUnit.HOURS.between(items.get(i).getCreatedAt(), LocalDateTime.now()) / 24.0;
+            MemoryItem item = items.get(i);
+            if (!isExpirableCategory(item.getCategory())) continue;
+            double inactiveDays = inactiveDays(item, now);
             if (consolidationCfg.getTtlDays() > 0
-                    && days > consolidationCfg.getTtlDays()
-                    && items.get(i).getImportance() < consolidationCfg.getMinImportance()) {
+                    && inactiveDays > consolidationCfg.getTtlDays()
+                    && item.getImportance() < consolidationCfg.getMinImportance()) {
                 removed.add(i);
                 result.expired++;
-                result.deleteFromDB.add(items.get(i).getId());
+                result.deleteFromDB.add(item.getId());
             }
         }
 
@@ -368,10 +406,13 @@ public class LongTermMemory {
 
         MemoryItem merged = new MemoryItem();
         merged.setId(base.getId());
+        merged.setBaseImportance(Math.max(baseImportance(base), baseImportance(other)));
         merged.setImportance(Math.max(base.getImportance(), other.getImportance()));
         merged.setEmbedding(base.getEmbedding());
-        merged.setCreatedAt(base.getCreatedAt());
-        merged.setLastAccessed(LocalDateTime.now());
+        merged.setCreatedAt(earlier(base.getCreatedAt(), other.getCreatedAt()));
+        merged.setLastAccessed(later(base.getLastAccessed(), other.getLastAccessed()));
+        merged.setRecallCount(saturatedAdd(base.getRecallCount(), other.getRecallCount()));
+        merged.setLastRecalledAt(later(base.getLastRecalledAt(), other.getLastRecalledAt()));
         merged.setCategory(moreSpecificCategory(base.getCategory(), other.getCategory()));
         List<String> mergedTags = new ArrayList<>(base.getTags() == null ? Collections.emptyList() : base.getTags());
         if (other.getTags() != null) {
@@ -402,7 +443,71 @@ public class LongTermMemory {
                 merged.setEmbedding(mergedEmb);
             }
         }
+        merged.setImportance(effectiveImportance(merged, LocalDateTime.now()));
         return merged;
+    }
+
+    private double effectiveImportance(MemoryItem item, LocalDateTime now) {
+        double base = baseImportance(item);
+        double boostRate = consolidationCfg == null ? 0.05 : consolidationCfg.getRecallBoostRate();
+        double maxBoost = consolidationCfg == null ? 0.20 : consolidationCfg.getMaxRecallBoost();
+        double recallBoost = Math.min(maxBoost, boostRate * Math.log1p(item.getRecallCount()));
+        double decay = 1.0;
+        if (isExpirableCategory(item.getCategory())) {
+            double halfLife = halfLifeDays(item.getCategory());
+            decay = Math.pow(2.0, -inactiveDays(item, now) / halfLife);
+        }
+        return clamp((base + recallBoost) * decay);
+    }
+
+    private double halfLifeDays(String category) {
+        if (consolidationCfg == null) return 90.0;
+        return switch (normalizedCategory(category)) {
+            case "preference" -> positive(consolidationCfg.getPreferenceHalfLifeDays(), 180);
+            case "tool_failure" -> positive(consolidationCfg.getToolFailureHalfLifeDays(), 60);
+            default -> positive(consolidationCfg.getGeneralHalfLifeDays(), 90);
+        };
+    }
+
+    private static boolean isExpirableCategory(String category) {
+        String normalized = normalizedCategory(category);
+        return !"identity".equals(normalized) && !"policy".equals(normalized);
+    }
+
+    private static String normalizedCategory(String category) {
+        return category == null || category.isBlank() ? "general" : category;
+    }
+
+    private static double inactiveDays(MemoryItem item, LocalDateTime now) {
+        LocalDateTime reference = item.getLastRecalledAt() != null ? item.getLastRecalledAt() : item.getCreatedAt();
+        if (reference == null || reference.isAfter(now)) return 0.0;
+        return ChronoUnit.MINUTES.between(reference, now) / 1440.0;
+    }
+
+    private static void ensureBaseImportance(MemoryItem item) {
+        if (item.getBaseImportance() <= 0) item.setBaseImportance(item.getImportance());
+    }
+
+    private static double baseImportance(MemoryItem item) {
+        ensureBaseImportance(item);
+        return item.getBaseImportance();
+    }
+
+    private static double positive(double value, double fallback) { return value > 0 ? value : fallback; }
+    private static double clamp(double value) { return Math.max(0.0, Math.min(1.0, value)); }
+    private static LocalDateTime earlier(LocalDateTime a, LocalDateTime b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return a.isBefore(b) ? a : b;
+    }
+    private static LocalDateTime later(LocalDateTime a, LocalDateTime b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return a.isAfter(b) ? a : b;
+    }
+    private static int saturatedAdd(int a, int b) {
+        long sum = (long) Math.max(0, a) + Math.max(0, b);
+        return sum > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
     }
 
     private static String moreSpecificCategory(String first, String second) {

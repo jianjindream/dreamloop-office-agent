@@ -9,6 +9,7 @@ import com.jianjin.assistant.service.memory.PreferenceMemory;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -65,16 +66,34 @@ class ContextAssemblerTest {
         ltm.storeItem(classified(2, "内部普通事实", "general", 0.9));
 
         SourceRegistry reg = new SourceRegistry();
-        reg.register(new ProfileSource(pref, ltm));
-        reg.register(new RecallSource((query, topK, embedding) -> ltm.getItems()));
+        AtomicInteger profiledId = new AtomicInteger(-1);
+        reg.register(new ProfileSource(pref, ltm, profiledId::set));
+        AtomicInteger recalledId = new AtomicInteger(-1);
+        reg.register(new RecallSource((query, topK, embedding) -> ltm.getItems(), 3, recalledId::set));
         ContextAssembler asm = new ContextAssembler(Schemas.defaults(), reg);
 
         String rendered = asm.assemble(new Query("测试", List.of(), "", "chat")).render();
 
         assertTrue(rendered.contains("用户喜欢中文"));
         assertTrue(rendered.contains("内部普通事实"), "general 记忆应进入 Recall");
+        assertEquals(1, profiledId.get(), "进入 Profile 的长期记忆也应计为实际召回");
+        assertEquals(2, recalledId.get(), "只有通过分类过滤并真正进入 Prompt 的记忆才应计为召回");
         String profile = rendered.substring(rendered.indexOf("【用户画像】"), rendered.indexOf("【相关回忆】"));
         assertFalse(profile.contains("内部普通事实"), "general 记忆不应混入 Profile");
+    }
+
+    @Test
+    void recallTrimmedByContextBudgetIsNotCountedAsUsage() {
+        MemoryItem oversized = classified(9, "x".repeat(500), "general", 0.9);
+        AtomicInteger recalledId = new AtomicInteger(-1);
+        SourceRegistry reg = new SourceRegistry();
+        reg.register(new RecallSource((query, topK, embedding) -> List.of(oversized), 3, recalledId::set));
+
+        RuntimeContext context = new ContextAssembler(Schemas.defaults(), reg)
+                .assemble(new Query("测试", List.of(), "", "chat"));
+
+        assertFalse(context.render().contains("x"));
+        assertEquals(-1, recalledId.get(), "被槽位预算裁掉的候选不应计为实际召回");
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.jianjin.assistant.service.memory.SessionSummary;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.sql.Timestamp;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -31,12 +32,26 @@ class MemoryRepositoryFallbackTest {
         LongTermRepository.Row stored = repository.loadAll("u1").get(0);
         assertEquals("preference", stored.category);
         assertEquals(List.of("style"), stored.tags);
+        assertEquals(0.7, stored.baseImportance);
+        assertEquals(0, stored.recallCount);
+
+        Timestamp recalledAt = new Timestamp(System.currentTimeMillis());
+        repository.recordRecall("u1", id, 0.75, 1, recalledAt);
+        LongTermRepository.Row recalled = repository.loadAll("u1").get(0);
+        assertEquals(1, recalled.recallCount);
+        assertNotNull(recalled.lastRecalledAt);
+        assertEquals(0.75, recalled.importance);
 
         repository.updateClassified("u1", id, "偏好非常简洁", 0.9, "[0.9,0.1]",
                 "preference", "[\"style\",\"concise\"]", "Profile");
+        Timestamp lastRecalledAt = recalled.lastRecalledAt;
+        repository.updateMetrics("u1", id, 0.8, 0.9, 3, lastRecalledAt);
         LongTermRepository.Row updated = repository.loadAll("u1").get(0);
         assertEquals("偏好非常简洁", updated.content);
-        assertEquals(0.9, updated.importance);
+        assertEquals(0.8, updated.importance);
+        assertEquals(0.9, updated.baseImportance);
+        assertEquals(3, updated.recallCount);
+        assertEquals(lastRecalledAt, updated.lastRecalledAt);
         assertEquals(List.of("style", "concise"), updated.tags);
 
         repository.deleteAll("u1", List.of(id));

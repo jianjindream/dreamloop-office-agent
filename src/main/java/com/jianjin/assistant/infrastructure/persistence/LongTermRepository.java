@@ -38,6 +38,9 @@ public class LongTermRepository {
         public String category;
         public List<String> tags;
         public String slotHint;
+        public double baseImportance;
+        public int recallCount;
+        public Timestamp lastRecalledAt;
     }
 
     public synchronized int save(String userId, String content, double importance, String embeddingJson) {
@@ -50,11 +53,12 @@ public class LongTermRepository {
         if (c == null) return saveMemory(userId, content, importance, embeddingJson, category, tagsJson, slotHint);
         String cat = (category == null || category.isEmpty()) ? "general" : category;
         try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO long_term_memory (user_id, content, importance, embedding, category, tags, slot_hint) " +
-                        "VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?) RETURNING id")) {
+                "INSERT INTO long_term_memory (user_id, content, importance, embedding, category, tags, slot_hint, base_importance) " +
+                        "VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?) RETURNING id")) {
             ps.setString(1, userId); ps.setString(2, content);
             ps.setDouble(3, importance); ps.setString(4, embeddingJson);
             ps.setString(5, cat); ps.setString(6, tagsJson); ps.setString(7, slotHint);
+            ps.setDouble(8, importance);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) return rs.getInt(1);
             }
@@ -74,7 +78,8 @@ public class LongTermRepository {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT id, content, importance, embedding, " +
                         "COALESCE(created_at, NOW()), COALESCE(last_accessed, NOW()), " +
-                        "COALESCE(category, 'general'), tags, slot_hint " +
+                        "COALESCE(category, 'general'), tags, slot_hint, " +
+                        "COALESCE(base_importance, importance), COALESCE(recall_count, 0), last_recalled_at " +
                         "FROM long_term_memory WHERE user_id = ? ORDER BY id")) {
             ps.setString(1, userId);
             try (ResultSet rs = ps.executeQuery()) {
@@ -99,6 +104,9 @@ public class LongTermRepository {
                     } catch (Exception ignored) {}
                 }
                 row.slotHint = rs.getString(9);
+                row.baseImportance = rs.getDouble(10);
+                row.recallCount = rs.getInt(11);
+                row.lastRecalledAt = rs.getTimestamp(12);
                 items.add(row);
             }
             }
@@ -164,6 +172,80 @@ public class LongTermRepository {
         }
     }
 
+    public synchronized void recordRecall(String userId, int id, double effectiveImportance, int recallCount,
+                                          Timestamp lastRecalledAt) {
+        Connection c = pg.connection();
+        if (c == null) {
+            for (Row row : memoryData.getOrDefault(userId, List.of())) {
+                if (row.id != id) continue;
+                if (recallCount >= row.recallCount) {
+                    row.recallCount = recallCount;
+                    row.lastRecalledAt = lastRecalledAt;
+                    row.lastAccessed = lastRecalledAt;
+                    row.importance = effectiveImportance;
+                }
+                return;
+            }
+            return;
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE long_term_memory SET recall_count = GREATEST(recall_count, ?), " +
+                        "last_recalled_at = CASE WHEN last_recalled_at IS NULL OR last_recalled_at < ? THEN ? ELSE last_recalled_at END, " +
+                        "last_accessed = CASE WHEN last_accessed IS NULL OR last_accessed < ? THEN ? ELSE last_accessed END, " +
+                        "importance = GREATEST(importance, ?) WHERE id = ? AND user_id = ?")) {
+            ps.setInt(1, Math.max(0, recallCount));
+            ps.setTimestamp(2, lastRecalledAt); ps.setTimestamp(3, lastRecalledAt);
+            ps.setTimestamp(4, lastRecalledAt); ps.setTimestamp(5, lastRecalledAt);
+            ps.setDouble(6, effectiveImportance); ps.setInt(7, id); ps.setString(8, userId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            log.warn("长期记忆召回统计更新失败 (id={}): {}", id, e.getMessage());
+        }
+    }
+
+    public synchronized void updateMetrics(String userId, int id, double importance, double baseImportance,
+                                           int recallCount, Timestamp lastRecalledAt) {
+        Connection c = pg.connection();
+        if (c == null) {
+            for (Row row : memoryData.getOrDefault(userId, List.of())) {
+                if (row.id != id) continue;
+                row.baseImportance = baseImportance;
+                int normalizedRecallCount = Math.max(0, recallCount);
+                if (normalizedRecallCount >= row.recallCount) {
+                    row.importance = importance;
+                    row.recallCount = normalizedRecallCount;
+                    if (lastRecalledAt != null && (row.lastRecalledAt == null
+                            || lastRecalledAt.after(row.lastRecalledAt))) {
+                        row.lastRecalledAt = lastRecalledAt;
+                    }
+                }
+                return;
+            }
+            return;
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE long_term_memory SET base_importance = ?, " +
+                        "importance = CASE WHEN recall_count <= ? THEN ? ELSE importance END, " +
+                        "recall_count = GREATEST(recall_count, ?), " +
+                        "last_recalled_at = CASE WHEN ? IS NOT NULL " +
+                        "AND (last_recalled_at IS NULL OR last_recalled_at < ?) " +
+                        "THEN ? ELSE last_recalled_at END WHERE id = ? AND user_id = ?")) {
+            int normalizedRecallCount = Math.max(0, recallCount);
+            ps.setDouble(1, baseImportance);
+            ps.setInt(2, normalizedRecallCount);
+            ps.setDouble(3, importance);
+            ps.setInt(4, normalizedRecallCount);
+            ps.setTimestamp(5, lastRecalledAt);
+            ps.setTimestamp(6, lastRecalledAt);
+            ps.setTimestamp(7, lastRecalledAt);
+            ps.setInt(8, id);
+            ps.setString(9, userId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            log.warn("长期记忆指标更新失败 (id={}): {}", id, e.getMessage());
+        }
+    }
+
     private int saveMemory(String userId, String content, double importance, String embeddingJson,
                            String category, String tagsJson, String slotHint) {
         Row row = new Row();
@@ -176,6 +258,8 @@ public class LongTermRepository {
         row.category = category == null || category.isBlank() ? "general" : category;
         row.tags = parseStrings(tagsJson);
         row.slotHint = slotHint;
+        row.baseImportance = importance;
+        row.recallCount = 0;
         memoryData.computeIfAbsent(userId, ignored -> new ArrayList<>()).add(row);
         return row.id;
     }
@@ -209,6 +293,9 @@ public class LongTermRepository {
         row.category = source.category;
         row.tags = source.tags == null ? null : new ArrayList<>(source.tags);
         row.slotHint = source.slotHint;
+        row.baseImportance = source.baseImportance;
+        row.recallCount = source.recallCount;
+        row.lastRecalledAt = source.lastRecalledAt == null ? null : new Timestamp(source.lastRecalledAt.getTime());
         return row;
     }
 }

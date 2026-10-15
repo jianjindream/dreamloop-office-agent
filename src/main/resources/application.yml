@@ -65,22 +65,26 @@ app:
     # A synchronous benchmark run is capped to protect the serving process and LLM budget.
     max-cases: 200
   memory:
-    short-term-max-turns: 10
+    short-term-max-turns: 12
     long-term-top-k: 3
-    min-recent-turns: 4
+    min-recent-turns: 5
     context-window-tokens: 32768
     reserved-output-tokens: 4096
     history-max-tokens: 8000
     summary-max-tokens: 1200
-    summary-soft-turns: 8
+    summary-soft-turns: 10
     summary-soft-tokens: 6000
     consolidation:
       similarity-threshold: 0.80
       dedup-threshold: 0.95
       ttl-days: 30
-      decay-rate: 0.995
+      preference-half-life-days: 180
+      general-half-life-days: 90
+      tool-failure-half-life-days: 60
+      recall-boost-rate: 0.05
+      max-recall-boost: 0.20
       min-importance: 0.3
-      trigger-interval: 5
+      trigger-interval: 10
   harness:
     max-retries: 3
     retry-delay-ms: 200

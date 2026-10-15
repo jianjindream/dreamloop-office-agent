@@ -523,6 +523,9 @@ public class UnifiedAgentService {
         } catch (Exception ignored) { }
         infra.updateLongTermItemClassified(userId, item.getId(), item.getContent(), item.getImportance(), embJson,
                 item.getCategory(), tagsJson, item.getSlotHint());
+        infra.updateLongTermMetrics(userId, item.getId(), item.getImportance(), item.getBaseImportance(),
+                item.getRecallCount(), item.getLastRecalledAt() == null ? null
+                        : java.sql.Timestamp.valueOf(item.getLastRecalledAt()));
     }
 
     private void restoreRAGFromDB() {

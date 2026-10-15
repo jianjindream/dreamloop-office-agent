@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.function.IntConsumer;
 
 public class RecallSource implements ContextSource {
 
@@ -23,12 +24,18 @@ public class RecallSource implements ContextSource {
 
     private final Recaller recaller;
     private final int configuredTopK;
+    private final IntConsumer recallObserver;
 
-    public RecallSource(Recaller recaller) { this(recaller, 0); }
+    public RecallSource(Recaller recaller) { this(recaller, 0, ignored -> { }); }
 
     public RecallSource(Recaller recaller, int configuredTopK) {
+        this(recaller, configuredTopK, ignored -> { });
+    }
+
+    public RecallSource(Recaller recaller, int configuredTopK, IntConsumer recallObserver) {
         this.recaller = recaller;
         this.configuredTopK = configuredTopK;
+        this.recallObserver = recallObserver == null ? ignored -> { } : recallObserver;
     }
 
     @Override
@@ -65,7 +72,9 @@ public class RecallSource implements ContextSource {
             Map<String, String> meta = new LinkedHashMap<>();
             String text = String.format("%s（重要性=%.2f, 综合分=%.2f）",
                     h.getContent(), h.getImportance(), h.getScore());
-            items.add(new ContextItem(text, h.getScore(), id(), meta));
+            ContextItem contextItem = new ContextItem(text, h.getScore(), id(), meta);
+            contextItem.setIncludedListener(() -> recallObserver.accept(h.getId()));
+            items.add(contextItem);
             if (items.size() >= topK) break;
         }
         return items;

@@ -35,7 +35,22 @@ public class ContextAssembler {
 
         RuntimeContext rc = new RuntimeContext(schema, new ArrayList<>(List.of(filled)));
         applyGlobalBudget(rc);
+        markIncludedItems(rc);
         return rc;
+    }
+
+    private static void markIncludedItems(RuntimeContext rc) {
+        for (FilledSlot slot : rc.getFilled()) {
+            if (slot.isSkipped() || slot.getItems() == null) continue;
+            for (ContextItem item : slot.getItems()) {
+                if (item.getText() == null || item.getText().isBlank()) continue;
+                try {
+                    item.markIncluded();
+                } catch (RuntimeException ignored) {
+                    // Usage accounting is best effort and must not break prompt assembly.
+                }
+            }
+        }
     }
 
     private FilledSlot fillSlot(Slot slot, Query q) {

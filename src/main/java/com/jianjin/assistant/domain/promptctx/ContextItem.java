@@ -10,6 +10,8 @@ public class ContextItem {
     private String source;
     /** 调试用元数据 */
     private Map<String, String> meta = new LinkedHashMap<>();
+    /** Invoked only after this item survives slot and global context budgets. */
+    private Runnable includedListener;
 
     public ContextItem() {}
 
@@ -32,4 +34,8 @@ public class ContextItem {
     public void setSource(String source) { this.source = source; }
     public Map<String, String> getMeta() { return meta; }
     public void setMeta(Map<String, String> meta) { this.meta = meta; }
+    public void setIncludedListener(Runnable includedListener) { this.includedListener = includedListener; }
+    public void markIncluded() {
+        if (includedListener != null) includedListener.run();
+    }
 }

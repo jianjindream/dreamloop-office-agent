@@ -13,14 +13,22 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.IntConsumer;
 
 public class ProfileSource implements ContextSource {
 
     private final PreferenceMemory pref;
     private final LongTermMemory ltm;
+    private final IntConsumer recallObserver;
 
     public ProfileSource(PreferenceMemory pref, LongTermMemory ltm) {
-        this.pref = pref; this.ltm = ltm;
+        this(pref, ltm, ignored -> { });
+    }
+
+    public ProfileSource(PreferenceMemory pref, LongTermMemory ltm, IntConsumer recallObserver) {
+        this.pref = pref;
+        this.ltm = ltm;
+        this.recallObserver = recallObserver == null ? ignored -> { } : recallObserver;
     }
 
     @Override
@@ -47,7 +55,9 @@ public class ProfileSource implements ContextSource {
                 if (count >= limit) break;
                 String category = item.getCategory() == null ? "general" : item.getCategory();
                 if (!slot.getFilter().getCategories().contains(category)) continue;
-                items.add(new ContextItem(item.getContent(), item.getImportance(), id()));
+                ContextItem contextItem = new ContextItem(item.getContent(), item.getImportance(), id());
+                contextItem.setIncludedListener(() -> recallObserver.accept(item.getId()));
+                items.add(contextItem);
                 count++;
             }
         }

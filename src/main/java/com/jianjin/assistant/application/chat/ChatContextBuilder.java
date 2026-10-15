@@ -44,16 +44,16 @@ public class ChatContextBuilder {
         this.toolTracker = new ToolStateTracker(10);
 
         SourceRegistry registry = new SourceRegistry();
-        registry.register(new ProfileSource(pref, ltm));
+        registry.register(new ProfileSource(pref, ltm, ltm::markRecalled));
         registry.register(new PlannerSource(plannerProvider));
         registry.register(new TaskMemSource(taskMem));
         registry.register(new ToolStateSource(toolsRegistry, toolTracker));
         registry.register(ConstraintsSource.fromBuiltinValidator());
         // 优先用图记忆作 Recaller；图层不可用时退化到 LTM
         if (graphMem != null) {
-            registry.register(new RecallSource(graphMem::recall, cfg.getMemory().getLongTermTopK()));
+            registry.register(new RecallSource(graphMem::recall, cfg.getMemory().getLongTermTopK(), graphMem::markRecalled));
         } else {
-            registry.register(new RecallSource(ltm::recall, cfg.getMemory().getLongTermTopK()));
+            registry.register(new RecallSource(ltm::recall, cfg.getMemory().getLongTermTopK(), ltm::markRecalled));
         }
         this.assembler = new ContextAssembler(Schemas.defaults(), registry);
     }

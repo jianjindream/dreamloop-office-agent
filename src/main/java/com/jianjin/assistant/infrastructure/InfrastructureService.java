@@ -139,6 +139,7 @@ public class InfrastructureService {
         public int id; public String content; public double importance;
         public List<Double> embedding; public Timestamp createdAt; public Timestamp lastAccessed;
         public String category; public List<String> tags; public String slotHint;
+        public double baseImportance; public int recallCount; public Timestamp lastRecalledAt;
     }
 
     public List<LongTermRow> loadLongTermItems(String userId) {
@@ -148,6 +149,8 @@ public class InfrastructureService {
             row.id = r.id; row.content = r.content; row.importance = r.importance;
             row.embedding = r.embedding; row.createdAt = r.createdAt; row.lastAccessed = r.lastAccessed;
             row.category = r.category; row.tags = r.tags; row.slotHint = r.slotHint;
+            row.baseImportance = r.baseImportance; row.recallCount = r.recallCount;
+            row.lastRecalledAt = r.lastRecalledAt;
             out.add(row);
         }
         return out;
@@ -161,6 +164,16 @@ public class InfrastructureService {
                                              String embeddingJson, String category, String tagsJson,
                                              String slotHint) {
         longTermRepo.updateClassified(userId, id, content, importance, embeddingJson, category, tagsJson, slotHint);
+    }
+
+    public void recordLongTermRecall(String userId, int id, double effectiveImportance, int recallCount,
+                                     Timestamp lastRecalledAt) {
+        longTermRepo.recordRecall(userId, id, effectiveImportance, recallCount, lastRecalledAt);
+    }
+
+    public void updateLongTermMetrics(String userId, int id, double importance, double baseImportance,
+                                      int recallCount, Timestamp lastRecalledAt) {
+        longTermRepo.updateMetrics(userId, id, importance, baseImportance, recallCount, lastRecalledAt);
     }
 
     public void deleteLongTermItems(String userId, List<Integer> ids) {

@@ -255,9 +255,13 @@ public class AppConfig {
         private double similarityThreshold = 0.80;
         private double dedupThreshold = 0.95;
         private int ttlDays = 30;
-        private double decayRate = 0.995;
+        private int preferenceHalfLifeDays = 180;
+        private int generalHalfLifeDays = 90;
+        private int toolFailureHalfLifeDays = 60;
+        private double recallBoostRate = 0.05;
+        private double maxRecallBoost = 0.20;
         private double minImportance = 0.3;
-        private int triggerInterval = 5;
+        private int triggerInterval = 10;
 
         public double getSimilarityThreshold() { return similarityThreshold; }
         public void setSimilarityThreshold(double similarityThreshold) { this.similarityThreshold = similarityThreshold; }
@@ -265,8 +269,16 @@ public class AppConfig {
         public void setDedupThreshold(double dedupThreshold) { this.dedupThreshold = dedupThreshold; }
         public int getTtlDays() { return ttlDays; }
         public void setTtlDays(int ttlDays) { this.ttlDays = ttlDays; }
-        public double getDecayRate() { return decayRate; }
-        public void setDecayRate(double decayRate) { this.decayRate = decayRate; }
+        public int getPreferenceHalfLifeDays() { return preferenceHalfLifeDays; }
+        public void setPreferenceHalfLifeDays(int preferenceHalfLifeDays) { this.preferenceHalfLifeDays = preferenceHalfLifeDays; }
+        public int getGeneralHalfLifeDays() { return generalHalfLifeDays; }
+        public void setGeneralHalfLifeDays(int generalHalfLifeDays) { this.generalHalfLifeDays = generalHalfLifeDays; }
+        public int getToolFailureHalfLifeDays() { return toolFailureHalfLifeDays; }
+        public void setToolFailureHalfLifeDays(int toolFailureHalfLifeDays) { this.toolFailureHalfLifeDays = toolFailureHalfLifeDays; }
+        public double getRecallBoostRate() { return recallBoostRate; }
+        public void setRecallBoostRate(double recallBoostRate) { this.recallBoostRate = recallBoostRate; }
+        public double getMaxRecallBoost() { return maxRecallBoost; }
+        public void setMaxRecallBoost(double maxRecallBoost) { this.maxRecallBoost = maxRecallBoost; }
         public double getMinImportance() { return minImportance; }
         public void setMinImportance(double minImportance) { this.minImportance = minImportance; }
         public int getTriggerInterval() { return triggerInterval; }

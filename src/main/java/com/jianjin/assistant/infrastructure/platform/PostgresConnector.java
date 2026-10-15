@@ -76,6 +76,12 @@ public class PostgresConnector {
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS tags JSONB",
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS slot_hint TEXT",
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'default'",
+                "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS base_importance FLOAT",
+                "UPDATE long_term_memory SET base_importance = importance WHERE base_importance IS NULL",
+                "ALTER TABLE long_term_memory ALTER COLUMN base_importance SET DEFAULT 0.5",
+                "ALTER TABLE long_term_memory ALTER COLUMN base_importance SET NOT NULL",
+                "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS recall_count INT NOT NULL DEFAULT 0",
+                "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS last_recalled_at TIMESTAMP",
                 "CREATE INDEX IF NOT EXISTS idx_long_term_memory_user ON long_term_memory(user_id, id)",
                 """
                 CREATE TABLE IF NOT EXISTS rag_parent_chunks (

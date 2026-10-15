@@ -189,6 +189,8 @@ public class GraphMemory {
 
     public boolean needConsolidation() { return ltm.needConsolidation(); }
 
+    public void markRecalled(int itemId) { ltm.markRecalled(itemId); }
+
     public int size() { return ltm.size(); }
 
     public record StoreResult(boolean added, int itemId) {}
