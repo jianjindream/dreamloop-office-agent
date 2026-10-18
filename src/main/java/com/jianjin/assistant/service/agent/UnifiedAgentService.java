@@ -15,6 +15,8 @@ import com.jianjin.assistant.domain.rag.HistoryMessage;
 import com.jianjin.assistant.dto.ChatRequest;
 import com.jianjin.assistant.dto.ChatResponse;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
+import com.jianjin.assistant.infrastructure.tool.BingSearchClient;
+import com.jianjin.assistant.infrastructure.tool.GoogleSearchClient;
 import com.jianjin.assistant.infrastructure.tool.TavilyClient;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentity;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentityHolder;
@@ -179,23 +181,63 @@ public class UnifiedAgentService {
                 }));
         tools.get("rag_search").setRaceSafe(true);
 
-        // search_web 工具（Tavily + LLM fallback）
-        tools.put("search_web", new Tool("search_web", "搜索互联网获取最新信息",
+        // Tavily 公网搜索；未配置时保留 LLM fallback，但不允许其作为真实检索源参与竞速。
+        boolean tavilyConfigured = hasText(cfg.getSearch().getApiKey());
+        tools.put("search_web", new Tool("search_web", "使用 Tavily 搜索互联网获取最新信息",
                 List.of(new ToolParam("query", "string", "搜索关键词", true)),
                 true,
                 params -> {
                     String q = params.get("query") != null ? params.get("query").toString() : "";
                     if (q.isEmpty()) throw new RuntimeException("搜索关键词不能为空");
-                    if (cfg.getSearch().getApiKey() != null && !cfg.getSearch().getApiKey().isEmpty()) {
+                    if (tavilyConfigured) {
                         try {
                             return TavilyClient.search(q, cfg.getSearch().getApiKey(), cfg.getSearch().getApiUrl());
-                        } catch (Exception ignored) {}
+                        } catch (Exception e) {
+                            throw new RuntimeException("Tavily Search 调用失败", e);
+                        }
                     }
                     return llm.chat(
                             "你是一个知识丰富的搜索引擎助手。请基于你的知识，对用户的搜索问题给出准确、详细的回答。直接给出答案，不要说「我不知道」或「我无法搜索」。",
                             List.of(Map.of("role", "user", "content", "搜索：" + q)));
                 }));
-        tools.get("search_web").setRaceSafe(true);
+        tools.get("search_web").setRaceSafe(tavilyConfigured);
+
+        AppConfig.BingSearchConfig bing = cfg.getSearch().getBing();
+        if (bing != null && hasText(bing.getApiKey()) && hasText(bing.getEndpoint()) && hasText(bing.getModel())) {
+            tools.put("bing_search", new Tool("bing_search",
+                    "使用 Microsoft Foundry Web Search（Bing grounding）搜索公开网络",
+                    List.of(new ToolParam("query", "string", "搜索关键词", true)),
+                    true,
+                    params -> {
+                        String q = params.get("query") == null ? "" : params.get("query").toString();
+                        try {
+                            return BingSearchClient.search(q, bing.getApiKey(), bing.getEndpoint(), bing.getModel());
+                        } catch (Exception e) {
+                            throw new RuntimeException("Bing Web Search 调用失败", e);
+                        }
+                    }));
+            tools.get("bing_search").setRaceSafe(true);
+        }
+
+        AppConfig.GoogleSearchConfig google = cfg.getSearch().getGoogle();
+        if (google != null && hasText(google.getApiKey()) && hasText(google.getEngineId())) {
+            tools.put("google_search", new Tool("google_search", "使用 Google Custom Search 搜索公开网络",
+                    List.of(new ToolParam("query", "string", "搜索关键词", true)),
+                    true,
+                    params -> {
+                        String q = params.get("query") == null ? "" : params.get("query").toString();
+                        try {
+                            return GoogleSearchClient.search(q, google.getApiKey(), google.getEngineId(), google.getApiUrl());
+                        } catch (Exception e) {
+                            throw new RuntimeException("Google Custom Search 调用失败", e);
+                        }
+                    }));
+            tools.get("google_search").setRaceSafe(true);
+        }
+        // 有真实公网源时移除未配置 Tavily 的模型兜底，避免 LLM 常识回答混入检索竞速。
+        if (!tavilyConfigured && (tools.containsKey("bing_search") || tools.containsKey("google_search"))) {
+            tools.remove("search_web");
+        }
 
         restoreRAGFromDB();
         initKnowledgeGraph();
@@ -616,5 +658,9 @@ public class UnifiedAgentService {
     /** 兼容签名保留（旧调用点已统一改用 TavilyClient.search）。 */
     static String tavilySearch(String query, String apiKey, String apiUrl) throws Exception {
         return TavilyClient.search(query, apiKey, apiUrl);
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 }

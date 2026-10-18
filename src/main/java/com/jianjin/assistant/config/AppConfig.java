@@ -313,9 +313,41 @@ public class AppConfig {
     public static class SearchConfig {
         private String apiKey;
         private String apiUrl;
+        private BingSearchConfig bing = new BingSearchConfig();
+        private GoogleSearchConfig google = new GoogleSearchConfig();
 
         public String getApiKey() { return apiKey; }
         public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getApiUrl() { return apiUrl; }
+        public void setApiUrl(String apiUrl) { this.apiUrl = apiUrl; }
+        public BingSearchConfig getBing() { return bing; }
+        public void setBing(BingSearchConfig bing) { this.bing = bing; }
+        public GoogleSearchConfig getGoogle() { return google; }
+        public void setGoogle(GoogleSearchConfig google) { this.google = google; }
+    }
+
+    public static class BingSearchConfig {
+        private String apiKey;
+        private String endpoint;
+        private String model;
+
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getEndpoint() { return endpoint; }
+        public void setEndpoint(String endpoint) { this.endpoint = endpoint; }
+        public String getModel() { return model; }
+        public void setModel(String model) { this.model = model; }
+    }
+
+    public static class GoogleSearchConfig {
+        private String apiKey;
+        private String engineId;
+        private String apiUrl = "https://www.googleapis.com/customsearch/v1";
+
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getEngineId() { return engineId; }
+        public void setEngineId(String engineId) { this.engineId = engineId; }
         public String getApiUrl() { return apiUrl; }
         public void setApiUrl(String apiUrl) { this.apiUrl = apiUrl; }
     }
@@ -387,7 +419,7 @@ public class AppConfig {
     }
 
     public static class GraphConfig {
-        private int maxParallel = 2;
+        private int maxParallel = 4;
         private int raceTimeoutMs = 30000;
         /** 首个合格结果返回后，继续等待更优结果的短暂窗口。 */
         private int raceGraceMs = 150;

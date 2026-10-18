@@ -173,8 +173,9 @@ public class Planner {
                 - 工具参数需要引用上游结果时，使用 {{节点id.result}}，例如 {"text":"{{n1.result}}"}
                 - 只有只读、可安全取消且输出用途相同的检索工具才可设置相同 race_group
                 - race_group 使用 first-qualified 语义：最快返回但内容为空或无有效信息的结果不会获胜
-                - 内部/私有知识优先使用 rag_search；实时信息优先使用 search_web
-                - 需要同时利用内部资料和外部信息的研究、比较、分析任务不要设置 race_group，应并行执行后聚合
+                - Tavily(search_web)、Bing(bing_search)、Google(google_search) 是同用途的公开网络搜索源，可设置相同 web_search race_group
+                - rag_search 是内部/私有知识来源，不与公开网络搜索源竞速；需要内外部资料时让它独立并行，最终聚合
+                - 实时信息优先使用公开网络搜索工具，内部/私有知识优先使用 rag_search
                 - 无依赖关系的节点不要互相等待，depends_on 设为 []
                 - 需要研究、总结、报告、写文档时，优先使用 research_agent / writer_agent / review_agent / doc_agent 组合
                 - doc_agent 负责把上游内容保存到本地文档库并写入 RAG
@@ -251,6 +252,10 @@ public class Planner {
                     for (Object o : ld) if (o != null) deps.add(o.toString());
                 }
                 String rg = item.get("race_group") != null ? item.get("race_group").toString() : "";
+                if (nodeType == NodeType.TOOL
+                        && ("rag_search".equals(tool) || !ts.get(tool).isRaceSafe())) {
+                    rg = "";
+                }
 
                 if (nodeType == NodeType.SUB_AGENT) {
                     result.add(Node.subAgent(id, name, agent, goal, deps, rg));
@@ -361,14 +366,30 @@ public class Planner {
         boolean internalKnowledge = isInternalKnowledgeQuery(q);
         boolean realtime = isRealtimeQuery(q);
         boolean complementary = isComplementaryRetrievalQuery(q);
-        boolean searchRace = !internalKnowledge && !realtime && !complementary
-                && ts.containsKey("search_web") && ts.containsKey("rag_search");
-
-        if (ts.containsKey("search_web") && (!internalKnowledge || complementary)
+        boolean needsPublicSearch = (!internalKnowledge || complementary)
                 && (q.contains("搜索") || q.contains("查询") || q.contains("介绍")
-                    || q.contains("是什么") || q.contains("怎么") || q.contains("如何"))) {
-            nodes.add(new Node(nextID.get(), NodeType.TOOL, "搜索相关信息", "search_web",
-                    new HashMap<>(Map.of("query", query)), new ArrayList<>(), searchRace ? "search" : ""));
+                    || q.contains("是什么") || q.contains("怎么") || q.contains("如何"));
+
+        List<String> configuredPublicSources = List.of("search_web", "bing_search", "google_search").stream()
+                .filter(ts::containsKey)
+                .filter(name -> ts.get(name).isRaceSafe())
+                .toList();
+        // search_web 在未配置 Tavily 时是兼容旧行为的 LLM fallback；只有没有真实搜索源时才单独使用。
+        List<String> publicSources = configuredPublicSources.isEmpty() && ts.containsKey("search_web")
+                ? List.of("search_web") : configuredPublicSources;
+        boolean publicSearchRace = publicSources.size() >= 2;
+
+        if (needsPublicSearch) {
+            for (String source : publicSources) {
+                String description = switch (source) {
+                    case "bing_search" -> "使用 Bing 搜索公开网络";
+                    case "google_search" -> "使用 Google 搜索公开网络";
+                    default -> "使用 Tavily 搜索公开网络";
+                };
+                nodes.add(new Node(nextID.get(), NodeType.TOOL, description, source,
+                        new HashMap<>(Map.of("query", query)), new ArrayList<>(),
+                        publicSearchRace ? "web_search" : ""));
+            }
         }
         if (ts.containsKey("exec_command")
                 && (q.contains("执行") || q.contains("运行") || q.contains("命令")
@@ -378,13 +399,14 @@ public class Planner {
                     new HashMap<>(Map.of("command", query)), new ArrayList<>(), ""));
         }
         if (ts.containsKey("rag_search") && (!realtime || complementary)) {
-            // 仅通用快速查询与 Web 做质量门控竞速；内部、实时、复杂问题走来源优先或并行聚合。
+            // 私有知识与公网搜索语义不同：独立并行并在末端聚合，不参与公网搜索源淘汰。
             nodes.add(new Node(nextID.get(), NodeType.TOOL, "检索个人知识库", "rag_search",
-                    new HashMap<>(Map.of("query", query)), new ArrayList<>(), searchRace ? "search" : ""));
+                    new HashMap<>(Map.of("query", query)), new ArrayList<>(), ""));
         }
         // 其余 MCP / 自定义工具（无规则匹配的）按"独立并行 + query 兜底"加入
         java.util.Set<String> builtins = java.util.Set.of(
-                "get_time", "get_weather", "search_web", "rag_search", "exec_command");
+                "get_time", "get_weather", "search_web", "bing_search", "google_search",
+                "rag_search", "exec_command");
         for (Map.Entry<String, Tool> e : ts.entrySet()) {
             if (builtins.contains(e.getKey())) continue;
             Map<String, String> params = new HashMap<>();
