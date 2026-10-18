@@ -11,6 +11,8 @@ public class Validator {
     /** Block 级规则：任意一条命中即拒绝 */
     private static final List<Rule> BLOCK_RULES = List.of(
             r("\\u0000", "禁止 NUL 控制字符"),
+            r("[\\u0001-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]", "禁止 Shell 控制字符"),
+            r("\\$(?:\\{|[A-Za-z0-9_?!#$*@-])", "禁止 Shell 变量展开"),
             r("\\brm\\b[^\\r\\n]*\\s/(?:\\s|$)", "禁止删除根路径"),
             r("\\brm\\b[^\\r\\n]*(?:-[^\\s]*r[^\\s]*f|-[^\\s]*f[^\\s]*r)", "禁止 rm -rf"),
             r("\\bdd\\s+if=", "禁止 dd 设备写入"),
@@ -65,8 +67,14 @@ public class Validator {
         if (command == null || command.trim().isEmpty()) {
             return new ValidationResult(RiskLevel.BLOCK, "命令不能为空");
         }
+        String normalized;
+        try {
+            normalized = normalizeShell(command);
+        } catch (IllegalArgumentException e) {
+            return new ValidationResult(RiskLevel.BLOCK, e.getMessage());
+        }
         if (cfg.isAllowlistMode() && cfg.getAllowlist() != null && !cfg.getAllowlist().isEmpty()) {
-            String[] tokens = command.trim().split("\\s+", 2);
+            String[] tokens = normalized.trim().split("\\s+", 2);
             String first = tokens.length > 0 ? tokens[0] : "";
             boolean allowed = false;
             for (String a : cfg.getAllowlist()) {
@@ -78,7 +86,7 @@ public class Validator {
             }
         }
         for (Rule rule : BLOCK_RULES) {
-            if (rule.pattern.matcher(command).find()) {
+            if (rule.pattern.matcher(command).find() || rule.pattern.matcher(normalized).find()) {
                 return new ValidationResult(RiskLevel.BLOCK, rule.text);
             }
         }
@@ -94,6 +102,41 @@ public class Validator {
             return v;
         }
         return new ValidationResult(RiskLevel.SAFE);
+    }
+
+    /**
+     * Resolve quote concatenation and backslash escaping before policy matching. This is not a
+     * shell parser; it deliberately rejects expansions and malformed quoting and only exists to
+     * prevent forms such as {@code r\m} and {@code r'm'} from hiding an executable name.
+     */
+    static String normalizeShell(String command) {
+        StringBuilder out = new StringBuilder(command.length());
+        boolean single = false;
+        boolean quoted = false;
+        for (int i = 0; i < command.length(); i++) {
+            char ch = command.charAt(i);
+            if (single) {
+                if (ch == '\'') single = false;
+                else out.append(ch);
+                continue;
+            }
+            if (quoted) {
+                if (ch == '"') quoted = false;
+                else if (ch == '\\') {
+                    if (++i >= command.length()) throw new IllegalArgumentException("Shell 转义符不完整");
+                    out.append(command.charAt(i));
+                } else out.append(ch);
+                continue;
+            }
+            if (ch == '\'') single = true;
+            else if (ch == '"') quoted = true;
+            else if (ch == '\\') {
+                if (++i >= command.length()) throw new IllegalArgumentException("Shell 转义符不完整");
+                out.append(command.charAt(i));
+            } else out.append(ch);
+        }
+        if (single || quoted) throw new IllegalArgumentException("Shell 引号未闭合");
+        return out.toString();
     }
 
     private static Rule r(String pattern, String text) {

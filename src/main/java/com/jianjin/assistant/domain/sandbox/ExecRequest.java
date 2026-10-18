@@ -10,6 +10,10 @@ public class ExecRequest {
     private boolean confirm;
     /** Sandbox 签发、与命令绑定且只能使用一次的确认令牌。 */
     private String confirmationToken;
+    private String userId = "default";
+    private String workspaceId = "default";
+    private String sessionId = "default";
+    private String requestId = "";
 
     public ExecRequest() {}
 
@@ -31,4 +35,18 @@ public class ExecRequest {
     public void setConfirm(boolean confirm) { this.confirm = confirm; }
     public String getConfirmationToken() { return confirmationToken; }
     public void setConfirmationToken(String confirmationToken) { this.confirmationToken = confirmationToken; }
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = safe(userId, "default"); }
+    public String getWorkspaceId() { return workspaceId; }
+    public void setWorkspaceId(String workspaceId) { this.workspaceId = safe(workspaceId, "default"); }
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = safe(sessionId, "default"); }
+    public String getRequestId() { return requestId; }
+    public void setRequestId(String requestId) { this.requestId = safe(requestId, ""); }
+
+    public String approvalScope() { return workspaceId + "\n" + userId + "\n" + sessionId; }
+
+    private static String safe(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
+    }
 }

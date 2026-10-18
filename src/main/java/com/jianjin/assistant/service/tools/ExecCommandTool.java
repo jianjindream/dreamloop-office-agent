@@ -5,6 +5,8 @@ import com.jianjin.assistant.model.ToolParam;
 import com.jianjin.assistant.domain.sandbox.ExecRequest;
 import com.jianjin.assistant.domain.sandbox.ExecResult;
 import com.jianjin.assistant.domain.sandbox.Sandbox;
+import com.jianjin.assistant.interfaces.http.security.RequestIdentity;
+import com.jianjin.assistant.interfaces.http.security.RequestIdentityHolder;
 
 import java.util.List;
 
@@ -17,7 +19,8 @@ public final class ExecCommandTool {
         tool.setName("exec_command");
         tool.setDescription("在隔离沙箱中执行终端命令，可用命令取决于配置的沙箱镜像；"
                 + "危险命令（rm -rf、sudo、网络外联等）会被自动拒绝；"
-                + "涉及删除/安装/管道等中等风险命令必须先取得确认令牌，并在用户明确确认后再次调用。");
+                + "涉及删除/安装/管道等中等风险命令必须先取得令牌，由用户通过确认接口批准后再次调用。");
+        tool.setExecutionContextAware(true);
         tool.setParameters(List.of(
                 new ToolParam("command", "string", "要执行的 Shell 命令", true),
                 new ToolParam("confirm", "boolean", "用户已明确确认 warn 级命令；默认 false", false),
@@ -35,6 +38,23 @@ public final class ExecCommandTool {
             else if (cv instanceof String s) confirm = "true".equalsIgnoreCase(s) || "1".equals(s);
 
             ExecRequest req = new ExecRequest(cmdStr, null, confirm);
+            RequestIdentity identity = RequestIdentityHolder.current();
+            req.setUserId(identity.userId());
+            req.setWorkspaceId(identity.workspaceId());
+            req.setSessionId(identity.sessionId());
+            req.setRequestId(identity.requestId());
+            Object owner = params.get(Tool.CONTEXT_OWNER_KEY);
+            if (owner != null) {
+                String[] parts = owner.toString().split(":", 2);
+                if (parts.length == 2) {
+                    req.setWorkspaceId(parts[0]);
+                    req.setUserId(parts[1]);
+                }
+            }
+            Object session = params.get(Tool.CONTEXT_SESSION_ID);
+            if (session != null) req.setSessionId(session.toString());
+            Object requestId = params.get(Tool.CONTEXT_REQUEST_ID);
+            if (requestId != null) req.setRequestId(requestId.toString());
             Object token = params.get("confirmation_token");
             if (token != null) req.setConfirmationToken(token.toString());
             ExecResult result = sandbox.exec(req);

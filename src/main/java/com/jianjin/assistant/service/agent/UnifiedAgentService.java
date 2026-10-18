@@ -16,6 +16,7 @@ import com.jianjin.assistant.dto.ChatRequest;
 import com.jianjin.assistant.dto.ChatResponse;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
 import com.jianjin.assistant.infrastructure.tool.TavilyClient;
+import com.jianjin.assistant.interfaces.http.security.RequestIdentity;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentityHolder;
 import com.jianjin.assistant.model.MemoryItem;
 import com.jianjin.assistant.model.Snapshot;
@@ -48,11 +49,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.HexFormat;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -88,9 +92,12 @@ public class UnifiedAgentService {
     private static final Logger log = LoggerFactory.getLogger(UnifiedAgentService.class);
     private static final ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private static final Pattern SECRET_OPTION = Pattern.compile(
-            "(?i)(--?(?:password|passwd|token|api[-_]?key|secret)(?:=|\\s+))(\"[^\"]*\"|'[^']*'|[^\\s]+)");
+            "(?i)((?<![A-Za-z0-9_-])--?(?:password|passwd|token|api[-_]?key|secret)(?:=|\\s+))(\"[^\"]*\"|'[^']*'|[^\\s]+)");
     private static final Pattern SECRET_ENV = Pattern.compile(
             "(?i)\\b([A-Z0-9_]*(?:PASSWORD|PASSWD|TOKEN|API_KEY|SECRET)[A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\\s]+)");
+    private static final Pattern SECRET_QUERY = Pattern.compile(
+            "(?i)([?&](?:token|access_token|api[-_]?key|password|secret)=)[^&\\s]+" );
+    private static final Pattern SECRET_BEARER = Pattern.compile("(?i)(authorization\\s*[:=]\\s*bearer\\s+)[^\\s]+" );
 
     private final AppConfig cfg;
     private final LlmService llm;
@@ -245,6 +252,12 @@ public class UnifiedAgentService {
             event.put("event_id", UUID.randomUUID().toString());
             event.put("occurred_at", Instant.now().toString());
             event.put("command", redactCommand(r.getCommand()));
+            event.put("command_sha256", sha256(r.getCommand()));
+            event.put("policy_version", "sandbox-v2");
+            event.put("user_id", r.getUserId());
+            event.put("workspace_id", r.getWorkspaceId());
+            event.put("session_id", r.getSessionId());
+            event.put("request_id", r.getRequestId());
             if (r.getValidation() != null) {
                 event.put("level", r.getValidation().getLevel().value());
                 event.put("reason", r.getValidation().getReason());
@@ -255,6 +268,12 @@ public class UnifiedAgentService {
             event.put("backend", r.getBackend());
             event.put("killed", r.isKilled());
             event.put("truncated", r.isTruncated());
+            event.put("outcome", switch (r.getExitCode()) {
+                case -1 -> "blocked";
+                case -2 -> "confirmation_required";
+                case -6 -> "busy";
+                default -> "executed";
+            });
             infra.publishEvent("sandbox.exec", mapper.writeValueAsString(event));
         } catch (Exception e) {
             log.warn("构造沙箱审计事件失败: {}", e.getMessage());
@@ -264,7 +283,19 @@ public class UnifiedAgentService {
     static String redactCommand(String command) {
         if (command == null) return null;
         String redacted = SECRET_OPTION.matcher(command).replaceAll("$1***");
-        return SECRET_ENV.matcher(redacted).replaceAll("$1=***");
+        redacted = SECRET_ENV.matcher(redacted).replaceAll("$1=***");
+        redacted = SECRET_QUERY.matcher(redacted).replaceAll("$1***");
+        return SECRET_BEARER.matcher(redacted).replaceAll("$1***");
+    }
+
+    static String sha256(String value) {
+        if (value == null) return null;
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
     }
 
     // ===== Public API =====
@@ -292,6 +323,14 @@ public class UnifiedAgentService {
 
     private ChatResponse processInternal(String query, ChatRequest req, AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
         MemoryScope scope = MemoryScope.from(req.getUserId(), req.getSessionId());
+        RequestIdentity baseIdentity = RequestIdentityHolder.current();
+        if ((baseIdentity.requestId() == null || baseIdentity.requestId().isBlank())
+                && req.getRequestId() != null && !req.getRequestId().isBlank()) {
+            baseIdentity = new RequestIdentity(baseIdentity.userId(), baseIdentity.workspaceId(),
+                    baseIdentity.sessionId(), req.getRequestId());
+        }
+        try (RequestIdentityHolder.Scope identityScope = RequestIdentityHolder.bind(
+                baseIdentity.withSessionId(scope.sessionId()))) {
         UserMemorySpace space = memorySpaces.user(scope.userId());
         SessionMemoryState session = memorySpaces.session(scope);
         session.lock().lock();
@@ -352,7 +391,7 @@ public class UnifiedAgentService {
 
         switch (mode) {
             case "react" -> reactLoop.runStream(resp, query, toolset, memPrefix, histMsgs,
-                    scope.userId(), scope.sessionId(), "", cancelled, onEvent);
+                    scope.userId(), scope.sessionId(), req.getRequestId(), cancelled, onEvent);
             case "tool" -> new ToolModeHandler(llm, toolService, pref).run(resp, query, toolset, memPrefix, histMsgs);
             case "rag" -> {
                 RagService.QueryResult qr = rag.queryWithHistory(
@@ -401,6 +440,7 @@ public class UnifiedAgentService {
         return resp;
         } finally {
             session.lock().unlock();
+        }
         }
     }
 

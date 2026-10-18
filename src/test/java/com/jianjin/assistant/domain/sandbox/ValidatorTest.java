@@ -42,4 +42,14 @@ class ValidatorTest {
         assertEquals(RiskLevel.BLOCK, denied.getLevel());
         assertTrue(denied.getReason().contains("未在允许列表"));
     }
+
+    @Test
+    void normalizesShellObfuscationBeforeApplyingBlockRules() {
+        Validator validator = new Validator(config);
+
+        assertEquals(RiskLevel.BLOCK, validator.validate("r\\m -rf /tmp/data").getLevel());
+        assertEquals(RiskLevel.BLOCK, validator.validate("r'm' -rf /tmp/data").getLevel());
+        assertEquals(RiskLevel.BLOCK, validator.validate("c\"ur\"l example.com").getLevel());
+        assertEquals(RiskLevel.BLOCK, validator.validate("tool $DYNAMIC_ARG").getLevel());
+    }
 }

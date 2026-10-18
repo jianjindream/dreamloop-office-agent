@@ -6,6 +6,7 @@ frontend/dist/
 frontend/coverage/
 frontend/test-results/
 frontend/playwright-report/
+/data/
 
 # IDE and operating-system metadata
 .idea/

@@ -14,8 +14,10 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class DockerSandbox implements Executor {
 
@@ -81,9 +83,10 @@ public class DockerSandbox implements Executor {
             ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
             ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
             int maxOut = cfg.getMaxOutputBytes();
+            AtomicInteger remainingOutput = new AtomicInteger(maxOut);
 
-            Thread tOut = pumpStream(proc.getInputStream(), stdoutBuf, maxOut);
-            Thread tErr = pumpStream(proc.getErrorStream(), stderrBuf, maxOut);
+            Thread tOut = pumpStream(proc.getInputStream(), stdoutBuf, maxOut, remainingOutput);
+            Thread tErr = pumpStream(proc.getErrorStream(), stderrBuf, maxOut, remainingOutput);
 
             boolean finished = proc.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
             long duration = System.currentTimeMillis() - start;
@@ -97,7 +100,7 @@ public class DockerSandbox implements Executor {
                 result.setStdout(stdoutBuf.toString(StandardCharsets.UTF_8));
                 result.setStderr(appendIfMissing(stderrBuf.toString(StandardCharsets.UTF_8),
                         "\n[超时] 执行超过 " + timeout + " 被强制终止"));
-                result.setTruncated(maxOut > 0 && (stdoutBuf.size() >= maxOut || stderrBuf.size() >= maxOut));
+                result.setTruncated(maxOut > 0 && remainingOutput.get() <= 0);
                 result.setKilled(true);
                 result.setExitCode(-4);
                 return result;
@@ -109,7 +112,7 @@ public class DockerSandbox implements Executor {
             result.setStderr(stderrBuf.toString(StandardCharsets.UTF_8));
             result.setExitCode(proc.exitValue());
 
-            if (maxOut > 0 && (stdoutBuf.size() >= maxOut || stderrBuf.size() >= maxOut)) {
+            if (maxOut > 0 && remainingOutput.get() <= 0) {
                 result.setTruncated(true);
             }
             return result;
@@ -132,6 +135,7 @@ public class DockerSandbox implements Executor {
         args.add(containerName);
         args.add("--pull");
         args.add("never");
+        args.add("--init");
         args.add("--security-opt");
         args.add("no-new-privileges");
         args.add("--cap-drop");
@@ -161,7 +165,7 @@ public class DockerSandbox implements Executor {
         }
         if (cfg.getCpuPercent() > 0) {
             args.add("--cpus");
-            args.add(String.format("%.2f", cfg.getCpuPercent() / 100.0));
+            args.add(String.format(Locale.ROOT, "%.2f", cfg.getCpuPercent() / 100.0));
         }
         if (cfg.getMaxPids() > 0) {
             args.add("--pids-limit");
@@ -189,17 +193,26 @@ public class DockerSandbox implements Executor {
     }
 
     static Thread pumpStream(InputStream in, OutputStream out, int max) {
+        return pumpStream(in, out, max, new AtomicInteger(max));
+    }
+
+    static Thread pumpStream(InputStream in, OutputStream out, int max, AtomicInteger remaining) {
         Thread t = new Thread(() -> {
             try (in) {
                 byte[] buf = new byte[4096];
-                int total = 0;
                 int n;
                 while ((n = in.read(buf)) != -1) {
-                    if (max > 0 && total >= max) continue;
-                    int writable = max > 0 ? Math.min(n, max - total) : n;
+                    int writable = n;
+                    if (max > 0) {
+                        int before;
+                        do {
+                            before = remaining.get();
+                            if (before <= 0) { writable = 0; break; }
+                            writable = Math.min(n, before);
+                        } while (!remaining.compareAndSet(before, before - writable));
+                    }
                     if (writable > 0) {
                         out.write(buf, 0, writable);
-                        total += writable;
                     }
                 }
             } catch (Exception ignored) {}

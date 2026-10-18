@@ -51,6 +51,9 @@ import java.time.Instant;
 import java.util.UUID;
 import java.net.URI;
 import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 
 @RestController
 @RequestMapping("/api")
@@ -114,7 +117,7 @@ public class AgentController {
         AtomicLong sequence = new AtomicLong();
         emitter.onTimeout(() -> tasks.cancel(task.taskId(), identity.ownerKey()));
         executor.submit(() -> {
-            try {
+            try (RequestIdentityHolder.Scope identityScope = RequestIdentityHolder.bind(identity)) {
                 chat.processStream(req, task.cancelled(), ev -> {
                     try {
                         emitter.send(SseEmitter.event().id(task.taskId() + ":" + sequence.incrementAndGet())
@@ -143,6 +146,49 @@ public class AgentController {
         boolean cancelled = tasks.cancel(taskId, RequestIdentityHolder.current().ownerKey());
         if (!cancelled) throw new ApiException("TASK_NOT_FOUND", "任务不存在或无权取消", HttpStatus.NOT_FOUND);
         return Map.of("ok", true, "task_id", taskId, "message", "已发送取消信号");
+    }
+
+    /** POST /api/sandbox/confirm — explicit user approval for one warn-level command. */
+    @PostMapping("/sandbox/confirm")
+    public Map<String, Object> confirmSandboxCommand(@RequestBody Map<String, Object> body) {
+        String token = body.get("confirmation_token") == null ? "" : body.get("confirmation_token").toString();
+        String sessionId = body.get("session_id") == null ? "" : body.get("session_id").toString();
+        if (token.isBlank() || sessionId.isBlank()) {
+            throw new ApiException("SANDBOX_CONFIRMATION_REQUIRED",
+                    "confirmation_token 和 session_id 必填", HttpStatus.BAD_REQUEST);
+        }
+        if (!sessionId.matches("[A-Za-z0-9._-]{1,120}")) {
+            throw new ApiException("INVALID_SESSION_ID", "session_id 格式不正确", HttpStatus.BAD_REQUEST);
+        }
+        if (agent.getSandbox() == null) {
+            throw new ApiException("SANDBOX_DISABLED", "沙箱未启用", HttpStatus.SERVICE_UNAVAILABLE);
+        }
+        RequestIdentity identity = RequestIdentityHolder.current();
+        com.jianjin.assistant.domain.sandbox.Sandbox.ApprovalStatus status = agent.getSandbox().approve(
+                token, identity.userId(), identity.workspaceId(), sessionId);
+        try {
+            Map<String, Object> audit = new LinkedHashMap<>();
+            audit.put("event_id", UUID.randomUUID().toString());
+            audit.put("occurred_at", Instant.now().toString());
+            audit.put("confirmation_sha256", HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(token.getBytes(StandardCharsets.UTF_8))));
+            audit.put("user_id", identity.userId());
+            audit.put("workspace_id", identity.workspaceId());
+            audit.put("session_id", sessionId);
+            audit.put("request_id", identity.requestId());
+            audit.put("outcome", status.name().toLowerCase());
+            infra.publishEvent("sandbox.confirmation", SSE_MAPPER.writeValueAsString(audit));
+        } catch (Exception ignored) { }
+        switch (status) {
+            case FORBIDDEN -> throw new ApiException("SANDBOX_CONFIRMATION_FORBIDDEN",
+                    "确认令牌不属于当前用户或会话", HttpStatus.FORBIDDEN);
+            case EXPIRED -> throw new ApiException("SANDBOX_CONFIRMATION_EXPIRED",
+                    "确认令牌已过期", HttpStatus.GONE);
+            case NOT_FOUND -> throw new ApiException("SANDBOX_CONFIRMATION_NOT_FOUND",
+                    "确认令牌不存在", HttpStatus.NOT_FOUND);
+            default -> { }
+        }
+        return Map.of("ok", true, "status", "approved", "confirmation_token", token);
     }
 
     /** POST /api/upload — 上传文档到 RAG 知识库（JSON: content 字符串） */
@@ -489,6 +535,7 @@ public class AgentController {
             throw new ApiException("CHAT_MESSAGE_REQUIRED", "message is required", HttpStatus.BAD_REQUEST);
         }
         req.setUserId(RequestIdentityHolder.current().ownerKey());
+        req.setRequestId(RequestIdentityHolder.current().requestId());
         String sessionId = req.getSessionId();
         if (sessionId == null || sessionId.isBlank()) sessionId = "session_" + UUID.randomUUID().toString().replace("-", "");
         if (!sessionId.matches("[A-Za-z0-9._-]{1,120}")) {

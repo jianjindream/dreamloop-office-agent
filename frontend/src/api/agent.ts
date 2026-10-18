@@ -166,4 +166,9 @@ export const agentApi = {
     return request<UploadResult>('/api/upload/file', { method: 'POST', body: form }).then(assertOperation)
   },
   cancel: (taskId: string) => request<{ ok: boolean; message: string }>(`/api/chat/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),
+  confirmSandbox: (confirmationToken: string, sessionId: string) =>
+    request<{ ok: boolean; status: string }>('/api/sandbox/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ confirmation_token: confirmationToken, session_id: sessionId }),
+    }),
 }

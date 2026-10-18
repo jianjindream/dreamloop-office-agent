@@ -150,7 +150,12 @@ docker compose up -d --build
 | `app.memory.short-term-max-turns` | `10` | 短期记忆最大轮数 |
 | `app.harness.max-iterations` | `5` | ReAct 最大迭代数 |
 | `app.sandbox.backend` | `docker` | `docker`、`local` 或 `mock` |
+| `app.sandbox.image` | `alpine:3.19` | Docker 沙箱镜像；生产环境建议通过 `APP_SANDBOX_IMAGE` 固定为镜像摘要 |
+| `app.sandbox.max-concurrent-executions` | `4` | 全局同时运行的沙箱命令上限 |
+| `app.sandbox.acquire-timeout-ms` | `1000` | 并发额度等待时间，超时返回“沙箱繁忙” |
+| `app.sandbox.allow-unsafe-local-backend` | `false` | 显式允许宿主机执行；还必须开启非空白名单 |
 | `app.security.confirmation-ttl-seconds` | `300` | Warn 命令单次确认令牌的有效期（秒） |
+| `app.kafka.outbox-dir` | `data/kafka-outbox` | Kafka 事件投递前的持久化 Outbox |
 | `app.neo4j.enabled` | `true` | 是否尝试启用知识图谱 |
 
 外部服务的默认开发端口：
@@ -341,9 +346,20 @@ Docker 镜像包含 Vue 前端和 Spring Boot 后端。前端单元测试运行 
 | `rag_search` | 查询已导入的个人知识库 |
 | `exec_command` | 在配置的 Docker、Local 或 Mock 沙箱中执行经过校验的单条命令 |
 
-`exec_command` 默认使用 Docker 后端，并限制超时、输出大小、内存、CPU、PID、网络与只读根文件系统。Warn 级命令先返回一个与原命令绑定、短时有效且只能使用一次的确认令牌；用户明确确认后，第二次调用必须同时提交 `confirm=true` 和该令牌。Docker 不可用时执行会失败关闭，不会伪装成成功；`mock` 仅在显式配置时启用。使用 `local` 后端会直接在应用所在机器执行通过校验的 Safe 命令，只应在可信开发环境中开启。
+`exec_command` 默认使用 Docker 后端，并限制超时、总输出大小、内存、CPU、PID、网络、只读根文件系统和全局并发数。Warn 级命令先返回一个与原命令、用户、工作区和会话绑定的短时单次令牌。该令牌不能由模型自行批准，必须先由用户调用确认接口：
 
-应用在宿主机运行时可直接调用宿主机 Docker。若应用本身运行在容器中，默认镜像未持有 Docker daemon 权限，因此 Docker 沙箱会失败关闭；生产部署应使用独立沙箱执行节点，不建议把宿主机 Docker socket 直接挂载给应用容器。
+```http
+POST /api/sandbox/confirm
+Content-Type: application/json
+
+{"confirmation_token":"<token>","session_id":"<原会话 ID>"}
+```
+
+接口批准后，第二次工具调用仍需提交 `confirm=true` 和该令牌。Docker 不可用时执行会失败关闭，不会伪装成成功；`mock` 仅在显式配置时启用。Local 后端默认禁止；开发环境必须同时设置 `allow-unsafe-local-backend=true`、`security.allowlist-mode=true` 和非空白名单，并且执行器不会调用 `sh -c`。
+
+所有事件会先原子写入 `app.kafka.outbox-dir`，Kafka 确认写入后才删除；启动时 Kafka 不可用或运行中断线时，后台任务会持续重连并补发。Outbox 达到 `max-pending-events` 时会输出错误告警，避免无界占用磁盘。
+
+应用在宿主机运行时可直接调用宿主机 Docker。生产环境建议将 `APP_SANDBOX_IMAGE` 设置为 `image@sha256:...` 形式，避免可变标签导致运行内容漂移。若应用本身运行在容器中，默认镜像未持有 Docker daemon 权限，因此 Docker 沙箱会失败关闭；生产部署应使用独立沙箱执行节点，不建议把宿主机 Docker socket 直接挂载给应用容器。
 
 ## 生产使用前须知
 
@@ -351,4 +367,4 @@ Docker 镜像包含 Vue 前端和 Spring Boot 后端。前端单元测试运行 
 - Controller 当前允许跨域来源 `*`，且 API 没有内置认证与租户鉴权，不应直接暴露到公网。
 - Docker Compose 会启动多个资源密集型组件；资源有限时可只启动实际需要的服务。
 - 动态 MCP 工具会向配置的 HTTP Endpoint 发起请求，应限制可注册地址并增加认证、审计和网络策略。
-- Local 沙箱的隔离能力低于 Docker 沙箱；生产环境应使用真正隔离的执行节点，并按需收紧命令白名单。
+- Local 后端不是安全隔离边界，仅用于显式开启的可信开发环境；生产环境应使用独立 Docker/容器执行节点。

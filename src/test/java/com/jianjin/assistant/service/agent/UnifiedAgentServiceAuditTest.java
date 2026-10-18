@@ -8,9 +8,11 @@ class UnifiedAgentServiceAuditTest {
 
     @Test
     void redactsCommonSecretsFromAuditedCommand() {
-        String command = "tool --token abc API_KEY=xyz --password=secret --secret 'two words' --name visible";
+        String command = "tool --token abc API_KEY=xyz --password=secret --secret 'two words' "
+                + "https://example.test?a=1&access_token=leak Authorization: Bearer bearer-secret --name visible";
 
-        assertEquals("tool --token *** API_KEY=*** --password=*** --secret *** --name visible",
+        assertEquals("tool --token *** API_KEY=*** --password=*** --secret *** "
+                        + "https://example.test?a=1&access_token=*** Authorization: Bearer *** --name visible",
                 UnifiedAgentService.redactCommand(command));
     }
 }

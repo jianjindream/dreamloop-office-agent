@@ -17,6 +17,8 @@ public class ChatRequest {
     private String sessionId;
     @JsonIgnore
     private List<String> allowedToolKeys;
+    @JsonIgnore
+    private String requestId;
 
     public String getMessage() { return message; }
     public void setMessage(String message) { this.message = message; }
@@ -32,4 +34,6 @@ public class ChatRequest {
     public void setSessionId(String sessionId) { this.sessionId = sessionId; }
     public List<String> getAllowedToolKeys() { return allowedToolKeys; }
     public void setAllowedToolKeys(List<String> allowedToolKeys) { this.allowedToolKeys = allowedToolKeys; }
+    public String getRequestId() { return requestId; }
+    public void setRequestId(String requestId) { this.requestId = requestId; }
 }

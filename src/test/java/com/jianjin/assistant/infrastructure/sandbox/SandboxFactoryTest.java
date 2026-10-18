@@ -12,4 +12,17 @@ class SandboxFactoryTest {
         assertThrows(IllegalArgumentException.class, () -> SandboxFactory.build(
                 "typo", new AppConfig.SandboxConfig(), new AppConfig.SecurityConfig()));
     }
+
+    @Test
+    void localBackendRequiresExplicitOptInAndAllowlist() {
+        AppConfig.SandboxConfig sandbox = new AppConfig.SandboxConfig();
+        AppConfig.SecurityConfig security = new AppConfig.SecurityConfig();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> SandboxFactory.build("local", sandbox, security));
+
+        sandbox.setAllowUnsafeLocalBackend(true);
+        assertThrows(IllegalArgumentException.class,
+                () -> SandboxFactory.build("local", sandbox, security));
+    }
 }

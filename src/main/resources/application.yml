@@ -37,6 +37,9 @@ app:
   kafka:
     brokers: localhost:29092
     topic: agent-events
+    outbox-dir: "${APP_KAFKA_OUTBOX_DIR:data/kafka-outbox}"
+    reconnect-interval-ms: 5000
+    max-pending-events: 10000
   rag:
     chunk-size: 200
     chunk-overlap: 50
@@ -107,14 +110,18 @@ app:
   sandbox:
     enabled: true
     backend: "docker"        # docker | local | mock
-    image: "alpine:3.19"
+    image: "${APP_SANDBOX_IMAGE:alpine:3.19}"
     timeout-ms: 30000
     max-output-bytes: 65536
     memory-limit-mb: 256
     cpu-percent: 50
     max-pids: 64
+    max-concurrent-executions: 4
+    acquire-timeout-ms: 1000
     network-disabled: true
     readonly-rootfs: true
+    # Local 会在宿主机执行命令；必须显式开启且同时启用 security.allowlist-mode。
+    allow-unsafe-local-backend: false
 
   # ===== 命令安全校验 =====
   security:
@@ -128,10 +135,6 @@ app:
       - "echo"
       - "pwd"
       - "date"
-      - "python3"
-      - "node"
-      - "go"
-      - "java"
 
   # 生产环境开启后，所有 /api/* 请求必须携带 Bearer token。
   # tokens 的值格式为 userId:workspaceId；请仅通过外部配置注入真实 token。

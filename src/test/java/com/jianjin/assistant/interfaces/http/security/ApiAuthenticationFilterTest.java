@@ -25,7 +25,10 @@ class ApiAuthenticationFilterTest {
         filter.doFilter(request, response, (req, res) -> captured.set(RequestIdentityHolder.current()));
 
         assertEquals(200, response.getStatus());
-        assertEquals(new RequestIdentity("alice", "workspace-1"), captured.get());
+        assertEquals("alice", captured.get().userId());
+        assertEquals("workspace-1", captured.get().workspaceId());
+        assertEquals("default", captured.get().sessionId());
+        assertFalse(captured.get().requestId().isBlank());
         assertNotNull(response.getHeader("X-Request-Id"));
     }
 

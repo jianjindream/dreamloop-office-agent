@@ -237,6 +237,19 @@ const retryMessage = (messageId: string) => {
   sendMessage(userMessage.content, false)
 }
 
+const confirmCommand = async (token: string) => {
+  if (isStreaming.value) return
+  const session = chat.currentSession
+  if (!session) return
+  if (!window.confirm('该命令包含删除、安装或 Shell 操作符等风险。确认只执行当前展示的命令一次吗？')) return
+  try {
+    await agentApi.confirmSandbox(token, session.id)
+    await sendMessage(`我已在确认界面明确批准上一条警告级命令。请使用 confirm=true 和 confirmation_token=${token} 重新执行原命令。`)
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '命令确认失败，请重新发起。')
+  }
+}
+
 const toggleTool = (toolName: string) => {
   selectedTools.value = selectedTools.value.includes(toolName)
     ? selectedTools.value.filter((name) => name !== toolName)
@@ -298,7 +311,7 @@ onBeforeUnmount(() => abortController.value?.abort())
     </div>
 
     <section v-else ref="messageList" class="message-list" aria-live="polite">
-      <ChatMessageView v-for="message in messages" :key="message.id" :message="message" @retry="retryMessage" @to-document="toDocument" />
+      <ChatMessageView v-for="message in messages" :key="message.id" :message="message" @retry="retryMessage" @to-document="toDocument" @confirm-command="confirmCommand" />
     </section>
 
     <div class="composer-area">

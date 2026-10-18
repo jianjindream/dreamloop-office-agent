@@ -20,6 +20,10 @@ public class ExecResult {
     private boolean truncated;
     @JsonProperty("confirmation_token")
     private String confirmationToken;
+    private String userId;
+    private String workspaceId;
+    private String sessionId;
+    private String requestId;
 
     public ExecResult() {}
 
@@ -44,4 +48,12 @@ public class ExecResult {
     public void setTruncated(boolean truncated) { this.truncated = truncated; }
     public String getConfirmationToken() { return confirmationToken; }
     public void setConfirmationToken(String confirmationToken) { this.confirmationToken = confirmationToken; }
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    public String getWorkspaceId() { return workspaceId; }
+    public void setWorkspaceId(String workspaceId) { this.workspaceId = workspaceId; }
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    public String getRequestId() { return requestId; }
+    public void setRequestId(String requestId) { this.requestId = requestId; }
 }

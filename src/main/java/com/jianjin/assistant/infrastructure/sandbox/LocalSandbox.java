@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class LocalSandbox implements Executor {
 
@@ -56,18 +57,16 @@ public class LocalSandbox implements Executor {
         }
 
         try {
-            List<String> args = new ArrayList<>();
-            args.add("sh");
-            args.add("-c");
-            args.add(req.getCommand());
+            List<String> args = parseArgv(req.getCommand());
             ProcessBuilder pb = new ProcessBuilder(args);
             Process proc = pb.start();
             ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
             ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
             int maxOut = cfg.getMaxOutputBytes();
+            AtomicInteger remainingOutput = new AtomicInteger(maxOut);
 
-            Thread tOut = DockerSandbox.pumpStream(proc.getInputStream(), stdoutBuf, maxOut);
-            Thread tErr = DockerSandbox.pumpStream(proc.getErrorStream(), stderrBuf, maxOut);
+            Thread tOut = DockerSandbox.pumpStream(proc.getInputStream(), stdoutBuf, maxOut, remainingOutput);
+            Thread tErr = DockerSandbox.pumpStream(proc.getErrorStream(), stderrBuf, maxOut, remainingOutput);
 
             boolean finished = proc.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
             result.setDurationMs(System.currentTimeMillis() - start);
@@ -88,7 +87,7 @@ public class LocalSandbox implements Executor {
             result.setStdout(stdoutBuf.toString());
             result.setStderr(stderrBuf.toString());
             result.setExitCode(proc.exitValue());
-            if (maxOut > 0 && (stdoutBuf.size() >= maxOut || stderrBuf.size() >= maxOut)) {
+            if (maxOut > 0 && remainingOutput.get() <= 0) {
                 result.setTruncated(true);
             }
             return result;
@@ -99,5 +98,51 @@ public class LocalSandbox implements Executor {
             result.setDurationMs(System.currentTimeMillis() - start);
             return result;
         }
+    }
+
+    /** Local mode never invokes a shell: metacharacters and expansions are rejected outright. */
+    static List<String> parseArgv(String command) {
+        List<String> args = new ArrayList<>();
+        StringBuilder token = new StringBuilder();
+        boolean single = false;
+        boolean quoted = false;
+        boolean tokenStarted = false;
+        for (int i = 0; i < command.length(); i++) {
+            char ch = command.charAt(i);
+            if (single) {
+                if (ch == '\'') single = false;
+                else token.append(ch);
+                tokenStarted = true;
+                continue;
+            }
+            if (quoted) {
+                if (ch == '"') quoted = false;
+                else {
+                    if (ch == '\\' || ch == '$' || ch == '`')
+                        throw new IllegalArgumentException("Local 后端禁止 Shell 转义和展开");
+                    token.append(ch);
+                }
+                tokenStarted = true;
+                continue;
+            }
+            if (ch == '\'') { single = true; tokenStarted = true; }
+            else if (ch == '"') { quoted = true; tokenStarted = true; }
+            else if (Character.isWhitespace(ch)) {
+                if (tokenStarted) {
+                    args.add(token.toString());
+                    token.setLength(0);
+                    tokenStarted = false;
+                }
+            } else if (";&|<>`$\\".indexOf(ch) >= 0) {
+                throw new IllegalArgumentException("Local 后端禁止 Shell 操作符、转义和展开");
+            } else {
+                token.append(ch);
+                tokenStarted = true;
+            }
+        }
+        if (single || quoted) throw new IllegalArgumentException("Shell 引号未闭合");
+        if (tokenStarted) args.add(token.toString());
+        if (args.isEmpty()) throw new IllegalArgumentException("命令不能为空");
+        return args;
     }
 }

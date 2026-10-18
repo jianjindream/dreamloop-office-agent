@@ -121,11 +121,20 @@ public class AppConfig {
         /** comma-separated list, e.g. "localhost:29092" */
         private String brokers = "localhost:29092";
         private String topic = "agent-events";
+        private String outboxDir = "data/kafka-outbox";
+        private int reconnectIntervalMs = 5000;
+        private int maxPendingEvents = 10000;
 
         public String getBrokers() { return brokers; }
         public void setBrokers(String brokers) { this.brokers = brokers; }
         public String getTopic() { return topic; }
         public void setTopic(String topic) { this.topic = topic; }
+        public String getOutboxDir() { return outboxDir; }
+        public void setOutboxDir(String outboxDir) { this.outboxDir = outboxDir; }
+        public int getReconnectIntervalMs() { return reconnectIntervalMs; }
+        public void setReconnectIntervalMs(int reconnectIntervalMs) { this.reconnectIntervalMs = reconnectIntervalMs; }
+        public int getMaxPendingEvents() { return maxPendingEvents; }
+        public void setMaxPendingEvents(int maxPendingEvents) { this.maxPendingEvents = maxPendingEvents; }
     }
 
     public static class RagConfig {
@@ -343,8 +352,11 @@ public class AppConfig {
         private int memoryLimitMb = 256;
         private int cpuPercent = 50;
         private int maxPids = 64;
+        private int maxConcurrentExecutions = 4;
+        private int acquireTimeoutMs = 1000;
         private boolean networkDisabled = true;
         private boolean readonlyRootfs = true;
+        private boolean allowUnsafeLocalBackend = false;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -362,10 +374,16 @@ public class AppConfig {
         public void setCpuPercent(int cpuPercent) { this.cpuPercent = cpuPercent; }
         public int getMaxPids() { return maxPids; }
         public void setMaxPids(int maxPids) { this.maxPids = maxPids; }
+        public int getMaxConcurrentExecutions() { return maxConcurrentExecutions; }
+        public void setMaxConcurrentExecutions(int maxConcurrentExecutions) { this.maxConcurrentExecutions = maxConcurrentExecutions; }
+        public int getAcquireTimeoutMs() { return acquireTimeoutMs; }
+        public void setAcquireTimeoutMs(int acquireTimeoutMs) { this.acquireTimeoutMs = acquireTimeoutMs; }
         public boolean isNetworkDisabled() { return networkDisabled; }
         public void setNetworkDisabled(boolean networkDisabled) { this.networkDisabled = networkDisabled; }
         public boolean isReadonlyRootfs() { return readonlyRootfs; }
         public void setReadonlyRootfs(boolean readonlyRootfs) { this.readonlyRootfs = readonlyRootfs; }
+        public boolean isAllowUnsafeLocalBackend() { return allowUnsafeLocalBackend; }
+        public void setAllowUnsafeLocalBackend(boolean allowUnsafeLocalBackend) { this.allowUnsafeLocalBackend = allowUnsafeLocalBackend; }
     }
 
     public static class GraphConfig {

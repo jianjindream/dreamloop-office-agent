@@ -46,10 +46,11 @@ public class ApiAuthenticationFilter extends OncePerRequestFilter {
                 return;
             }
             String[] parts = subject.split(":", 2);
-            identity = new RequestIdentity(parts[0], parts.length > 1 ? parts[1] : auth.getDefaultWorkspace());
+            identity = new RequestIdentity(parts[0], parts.length > 1 ? parts[1] : auth.getDefaultWorkspace(),
+                    "default", requestId);
         } else {
             identity = new RequestIdentity(safe(request.getHeader("X-User-Id"), "default"),
-                    safe(request.getHeader("X-Workspace-Id"), auth.getDefaultWorkspace()));
+                    safe(request.getHeader("X-Workspace-Id"), auth.getDefaultWorkspace()), "default", requestId);
         }
         RequestIdentityHolder.set(identity);
         request.setAttribute("requestId", requestId);
