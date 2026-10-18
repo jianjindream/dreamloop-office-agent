@@ -12,13 +12,17 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class SnapshotManager {
 
     private static final ObjectMapper M = new ObjectMapper().registerModule(new JavaTimeModule());
+    private static final String DEFAULT_OWNER = "default:default";
+    private static final int MAX_SNAPSHOTS_PER_OWNER = 100;
 
     private final InfrastructureService infra;
-    private final List<Snapshot> snapshots = Collections.synchronizedList(new ArrayList<>());
+    private final Map<String, List<Snapshot>> snapshotsByOwner = new ConcurrentHashMap<>();
 
     public SnapshotManager(InfrastructureService infra) {
         this.infra = infra;
@@ -26,21 +30,44 @@ public class SnapshotManager {
 
     /** 拍一份快照（深拷贝 TaskState 后写入内存与 PG）。 */
     public void save(TaskState currentTask) {
+        save(DEFAULT_OWNER, currentTask);
+    }
+
+    public void save(String ownerKey, TaskState currentTask) {
         if (currentTask == null) return;
         try {
             String json = M.writeValueAsString(currentTask);
             TaskState copy = M.readValue(json, TaskState.class);
-            snapshots.add(new Snapshot(copy,
-                    LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))));
+            List<Snapshot> snapshots = ownerSnapshots(ownerKey);
+            synchronized (snapshots) {
+                snapshots.add(new Snapshot(copy,
+                        LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))));
+                while (snapshots.size() > MAX_SNAPSHOTS_PER_OWNER) snapshots.remove(0);
+            }
             infra.saveSnapshot(currentTask.getTaskId(), json);
         } catch (Exception ignored) {}
     }
 
     /** 清空内存快照（用于新任务开始时）。 */
-    public void clear() { snapshots.clear(); }
+    public void clear() { clear(DEFAULT_OWNER); }
+
+    public void clear(String ownerKey) { ownerSnapshots(ownerKey).clear(); }
 
     /** 副本（避免外部修改）。 */
-    public List<Snapshot> snapshots() { return new ArrayList<>(snapshots); }
+    public List<Snapshot> snapshots() { return snapshots(DEFAULT_OWNER); }
+
+    public List<Snapshot> snapshots(String ownerKey) {
+        List<Snapshot> snapshots = ownerSnapshots(ownerKey);
+        synchronized (snapshots) {
+            return new ArrayList<>(snapshots);
+        }
+    }
+
+    private List<Snapshot> ownerSnapshots(String ownerKey) {
+        String key = ownerKey == null || ownerKey.isBlank() ? DEFAULT_OWNER : ownerKey;
+        return snapshotsByOwner.computeIfAbsent(key,
+                ignored -> Collections.synchronizedList(new ArrayList<>()));
+    }
 
     /** 中断时构造摘要消息：已完成 X/Y 步 ... */
     public static String buildInterruptMessage(TaskState task) {

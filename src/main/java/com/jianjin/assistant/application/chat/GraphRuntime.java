@@ -13,19 +13,23 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.FutureTask;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -78,38 +82,63 @@ public class GraphRuntime {
     private final Map<String, Tool> tools;
     private final SubAgentRegistry subAgents;
     private final String taskQuery;
+    private final String ownerKey;
+    private final String sessionId;
+    private final String requestId;
     private final Semaphore sem;
     private final Object mu = new Object();
     private final Map<String, String> results = new LinkedHashMap<>();
     private final Map<String, String> errors = new LinkedHashMap<>();
     private final Consumer<StreamEvent> onEvent;
     private final AtomicBoolean cancelled;
+    private final Set<Future<?>> activeInvocations = ConcurrentHashMap.newKeySet();
+    private ExecutorService invocationExecutor;
 
     public GraphRuntime(TaskGraph graph, AppConfig appCfg, Config cfg,
                         Map<String, Tool> tools, AtomicBoolean cancelled,
                         Consumer<StreamEvent> onEvent) {
-        this(graph, appCfg, cfg, tools, null, "", cancelled, onEvent);
+        this(graph, appCfg, cfg, tools, null, "", "default:default", cancelled, onEvent);
     }
 
     public GraphRuntime(TaskGraph graph, AppConfig appCfg, Config cfg,
                         Map<String, Tool> tools, SubAgentRegistry subAgents,
                         String taskQuery, AtomicBoolean cancelled,
                         Consumer<StreamEvent> onEvent) {
+        this(graph, appCfg, cfg, tools, subAgents, taskQuery,
+                "default:default", cancelled, onEvent);
+    }
+
+    public GraphRuntime(TaskGraph graph, AppConfig appCfg, Config cfg,
+                        Map<String, Tool> tools, SubAgentRegistry subAgents,
+                        String taskQuery, String ownerKey, AtomicBoolean cancelled,
+                        Consumer<StreamEvent> onEvent) {
+        this(graph, appCfg, cfg, tools, subAgents, taskQuery, ownerKey,
+                "default", "", cancelled, onEvent);
+    }
+
+    public GraphRuntime(TaskGraph graph, AppConfig appCfg, Config cfg,
+                        Map<String, Tool> tools, SubAgentRegistry subAgents,
+                        String taskQuery, String ownerKey, String sessionId, String requestId,
+                        AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
         this.graph = graph;
         this.appCfg = appCfg;
         this.cfg = cfg == null ? Config.from(appCfg) : cfg;
         this.tools = tools;
         this.subAgents = subAgents;
         this.taskQuery = taskQuery == null ? "" : taskQuery;
+        this.ownerKey = ownerKey == null || ownerKey.isBlank() ? "default:default" : ownerKey;
+        this.sessionId = sessionId == null || sessionId.isBlank() ? "default" : sessionId;
+        this.requestId = requestId == null ? "" : requestId;
         this.sem = new Semaphore(this.cfg.maxParallel);
-        this.cancelled = cancelled;
+        this.cancelled = cancelled == null ? new AtomicBoolean(false) : cancelled;
         this.onEvent = onEvent == null ? e -> {} : onEvent;
     }
 
-    /** 执行整张图，逐层并行调度 + 竞速。 */
+    /** 执行整张图：节点完成后立即解锁其下游，不设置拓扑层全局栅栏。 */
     public GraphResult execute() {
         List<List<String>> levels;
         try {
+            graph.validate();
             levels = graph.topologicalLevels();
         } catch (Exception e) {
             log.warn("GraphRuntime: 图校验失败 {}", e.getMessage());
@@ -129,69 +158,145 @@ public class GraphRuntime {
             v.put("race_group", n.getRaceGroup()); v.put("status", n.getStatus().value());
             nodeView.put(e.getKey(), v);
         }
-        onEvent.accept(StreamEvent.graphReady(levels, nodeView));
+        safeEmit(StreamEvent.graphReady(levels, nodeView));
 
-        // 调度 ExecutorService（同时给 race 用作 attempt pool）
-        ExecutorService pool = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "graph-runtime");
-            t.setDaemon(true);
-            return t;
-        });
+        Map<String, ExecutionUnit> units = buildExecutionUnits();
+        Map<String, Integer> remainingDependencies = new LinkedHashMap<>();
+        Map<String, List<String>> downstream = new LinkedHashMap<>();
+        for (ExecutionUnit unit : units.values()) {
+            remainingDependencies.put(unit.id, unit.dependencies.size());
+            downstream.put(unit.id, new ArrayList<>());
+        }
+        for (ExecutionUnit unit : units.values()) {
+            for (String dependency : unit.dependencies) {
+                downstream.get(dependency).add(unit.id);
+            }
+        }
+
+        ExecutorService scheduler = Executors.newVirtualThreadPerTaskExecutor();
+        invocationExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        CompletionService<String> completions = new ExecutorCompletionService<>(scheduler);
+        Map<Future<String>, String> scheduled = new LinkedHashMap<>();
+        Set<String> submitted = new HashSet<>();
+        int completed = 0;
         try {
-            for (int li = 0; li < levels.size(); li++) {
+            for (ExecutionUnit unit : units.values()) {
+                if (remainingDependencies.get(unit.id) == 0) {
+                    submitUnit(unit, completions, scheduled, submitted);
+                }
+            }
+            while (completed < units.size()) {
                 if (cancelled.get()) {
-                    return interrupted("在第 " + li + " 层执行前被中断");
+                    return interrupted("图执行被用户中断");
                 }
-                List<String> level = levels.get(li);
-                List<String> runnable = new ArrayList<>();
-                for (String id : level) {
-                    if (dependenciesSucceeded(id)) {
-                        runnable.add(id);
-                    } else {
-                        skipForFailedDependencies(id);
-                    }
-                }
-                List<RaceGroup> groups = groupByRace(runnable);
-                CountDownLatch latch = new CountDownLatch(groups.size());
-                for (RaceGroup g : groups) {
-                    if (!g.raceGroup.isEmpty() && cfg.enableRacing && g.nodeIds.size() > 1) {
-                        pool.execute(() -> { try { runRace(g); } finally { latch.countDown(); } });
-                    } else {
-                        // 独立并行：组内每个节点都是一个独立子任务
-                        CountDownLatch innerLatch = new CountDownLatch(g.nodeIds.size());
-                        for (String id : g.nodeIds) {
-                            pool.execute(() -> {
-                                try { runSingle(id); } finally { innerLatch.countDown(); }
-                            });
-                        }
-                        pool.execute(() -> {
-                            try {
-                                innerLatch.await();
-                            } catch (InterruptedException ignored) {
-                                Thread.currentThread().interrupt();
-                            } finally {
-                                latch.countDown();
-                            }
-                        });
-                    }
-                }
+                Future<String> finished;
                 try {
-                    latch.await();
+                    finished = completions.poll(100, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    return interrupted("等待第 " + li + " 层时线程被中断");
+                    return interrupted("等待节点完成时线程被中断");
                 }
-                if (cancelled.get()) {
-                    return interrupted("在第 " + li + " 层执行后被中断");
+                if (finished == null) continue;
+                String unitId;
+                try {
+                    unitId = finished.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return interrupted("读取节点结果时线程被中断");
+                } catch (ExecutionException e) {
+                    unitId = scheduled.get(finished);
+                    failUnit(units.get(unitId), rootMessage(e));
+                }
+                completed++;
+                for (String childId : downstream.getOrDefault(unitId, List.of())) {
+                    int left = remainingDependencies.merge(childId, -1, Integer::sum);
+                    if (left == 0) {
+                        submitUnit(units.get(childId), completions, scheduled, submitted);
+                    }
                 }
             }
         } finally {
-            pool.shutdown();
-            try { pool.awaitTermination(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
+            if (cancelled.get()) scheduled.keySet().forEach(future -> future.cancel(true));
+            scheduler.shutdownNow();
+            cancelActiveInvocations();
+            invocationExecutor.shutdownNow();
         }
         return buildResult();
+    }
+
+    private static class ExecutionUnit {
+        final String id;
+        final String raceGroup;
+        final List<String> nodeIds = new ArrayList<>();
+        final Set<String> dependencies = new LinkedHashSet<>();
+
+        ExecutionUnit(String id, String raceGroup) {
+            this.id = id;
+            this.raceGroup = raceGroup;
+        }
+    }
+
+    private Map<String, ExecutionUnit> buildExecutionUnits() {
+        Map<String, List<String>> raceGroups = graph.raceGroups();
+        Map<String, ExecutionUnit> units = new LinkedHashMap<>();
+        Map<String, String> nodeToUnit = new HashMap<>();
+        for (Node node : graph.getNodes().values()) {
+            boolean racing = cfg.enableRacing && !node.getRaceGroup().isEmpty()
+                    && raceGroups.getOrDefault(node.getRaceGroup(), List.of()).size() > 1;
+            String unitId = racing ? "race:" + node.getRaceGroup() : "node:" + node.getId();
+            ExecutionUnit unit = units.computeIfAbsent(unitId,
+                    ignored -> new ExecutionUnit(unitId, racing ? node.getRaceGroup() : ""));
+            unit.nodeIds.add(node.getId());
+            nodeToUnit.put(node.getId(), unitId);
+        }
+        for (ExecutionUnit unit : units.values()) {
+            for (String nodeId : unit.nodeIds) {
+                for (String dependencyNode : graph.getNodes().get(nodeId).getDependsOn()) {
+                    String dependencyUnit = nodeToUnit.get(dependencyNode);
+                    if (dependencyUnit != null && !dependencyUnit.equals(unit.id)) {
+                        unit.dependencies.add(dependencyUnit);
+                    }
+                }
+            }
+        }
+        return units;
+    }
+
+    private void submitUnit(ExecutionUnit unit, CompletionService<String> completions,
+                            Map<Future<String>, String> scheduled, Set<String> submitted) {
+        if (unit == null || !submitted.add(unit.id)) return;
+        Future<String> future = completions.submit(() -> {
+            runUnit(unit);
+            return unit.id;
+        });
+        scheduled.put(future, unit.id);
+    }
+
+    private void runUnit(ExecutionUnit unit) {
+        for (String nodeId : unit.nodeIds) {
+            if (!dependenciesSucceeded(nodeId)) {
+                unit.nodeIds.forEach(this::skipForFailedDependencies);
+                return;
+            }
+        }
+        if (!unit.raceGroup.isEmpty() && unit.nodeIds.size() > 1) {
+            runRace(new RaceGroup(unit.raceGroup, unit.nodeIds));
+        } else {
+            runSingle(unit.nodeIds.getFirst());
+        }
+    }
+
+    private void failUnit(ExecutionUnit unit, String message) {
+        if (unit == null) return;
+        for (String nodeId : unit.nodeIds) {
+            applyAttempt(RaceAttempt.failed(nodeId, message));
+        }
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null) current = current.getCause();
+        return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
     }
 
     // ─────────────── 竞速执行（First-success-wins） ───────────────
@@ -202,35 +307,13 @@ public class GraphRuntime {
         RaceGroup(String rg, List<String> ids) { this.raceGroup = rg; this.nodeIds = ids; }
     }
 
-    private List<RaceGroup> groupByRace(List<String> level) {
-        Map<String, List<String>> grouped = new LinkedHashMap<>();
-        List<String> noGroup = new ArrayList<>();
-        for (String id : level) {
-            Node n = graph.getNodes().get(id);
-            String rg = n.getRaceGroup();
-            if (rg != null && !rg.isEmpty()) {
-                grouped.computeIfAbsent(rg, k -> new ArrayList<>()).add(id);
-            } else {
-                noGroup.add(id);
-            }
-        }
-        List<RaceGroup> result = new ArrayList<>();
-        for (Map.Entry<String, List<String>> e : grouped.entrySet()) {
-            result.add(new RaceGroup(e.getKey(), e.getValue()));
-        }
-        // 无 raceGroup 的节点合并为一个"普通组"，外层会在组内逐节点并行
-        if (!noGroup.isEmpty()) result.add(new RaceGroup("", noGroup));
-        result.sort(Comparator.comparing(g -> g.raceGroup));
-        return result;
-    }
-
     private void runRace(RaceGroup g) {
         AtomicBoolean raceClosed = new AtomicBoolean(false);
         BlockingQueue<RaceAttempt> ch = new ArrayBlockingQueue<>(g.nodeIds.size());
         Map<String, Thread> threads = new HashMap<>();
 
         for (String id : g.nodeIds) {
-            Thread t = new Thread(() -> {
+            Thread t = Thread.ofVirtual().name("race-" + g.raceGroup + "-" + id).unstarted(() -> {
                 if (raceClosed.get() || cancelled.get()) {
                     ch.offer(RaceAttempt.skipped(id, "竞速取消"));
                     return;
@@ -252,8 +335,7 @@ public class GraphRuntime {
                 } finally {
                     sem.release();
                 }
-            }, "race-" + g.raceGroup + "-" + id);
-            t.setDaemon(true);
+            });
             threads.put(id, t);
             // 必须用 Thread.start()，不能走 pool.execute(t) ——
             // 后者会让 pool 的 worker 调 t.run()，t 自己的线程从未启动，
@@ -261,16 +343,18 @@ public class GraphRuntime {
             t.start();
         }
 
-        long deadline = System.currentTimeMillis() + cfg.raceTimeoutMs;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(cfg.raceTimeoutMs);
         Map<String, RaceAttempt> attempts = new LinkedHashMap<>();
         RaceAttempt winner = null;
         int collected = 0;
         try {
             while (collected < g.nodeIds.size()) {
-                long left = deadline - System.currentTimeMillis();
+                if (cancelled.get()) break;
+                long left = deadline - System.nanoTime();
                 if (left <= 0) break;
-                RaceAttempt r = ch.poll(left, TimeUnit.MILLISECONDS);
-                if (r == null) break;
+                RaceAttempt r = ch.poll(Math.min(left, TimeUnit.MILLISECONDS.toNanos(100)),
+                        TimeUnit.NANOSECONDS);
+                if (r == null) continue;
                 collected++;
                 attempts.put(r.id, r);
                 if (r.status == NodeStatus.DONE) {
@@ -293,9 +377,9 @@ public class GraphRuntime {
         if (winner != null) {
             Node winnerNode = graph.getNodes().get(winner.id);
             applyAttempt(winner);
-            onEvent.accept(StreamEvent.nodeDone(winner.id, winnerNode.executorName(), NodeStatus.DONE.value()));
-            onEvent.accept(StreamEvent.raceWon(g.raceGroup, winner.id, winnerNode.executorName()));
-            onEvent.accept(StreamEvent.observation(winnerNode.executorName(), winner.result));
+            safeEmit(StreamEvent.nodeDone(winner.id, winnerNode.executorName(), NodeStatus.DONE.value()));
+            safeEmit(StreamEvent.raceWon(g.raceGroup, winner.id, winnerNode.executorName()));
+            safeEmit(StreamEvent.observation(winnerNode.executorName(), winner.result));
             for (String id : g.nodeIds) {
                 Node n = graph.getNodes().get(id);
                 if (!id.equals(winner.id)) {
@@ -304,19 +388,23 @@ public class GraphRuntime {
                         graph.setNodeResult(id, "");
                         graph.setNodeError(id, "");
                     }
-                    onEvent.accept(StreamEvent.nodeDone(id, n.executorName(), NodeStatus.SKIPPED.value()));
+                    safeEmit(StreamEvent.nodeDone(id, n.executorName(), NodeStatus.SKIPPED.value()));
                 }
             }
         } else {
             for (String id : g.nodeIds) {
                 RaceAttempt attempt = attempts.get(id);
-                if (attempt == null || attempt.status == NodeStatus.SKIPPED) {
+                if (cancelled.get()) {
+                    attempt = RaceAttempt.cancelled(id, "被用户中断");
+                } else if (attempt == null || attempt.status == NodeStatus.SKIPPED) {
                     attempt = RaceAttempt.failed(id, "竞速超时（" + cfg.raceTimeoutMs + "ms）");
                 }
                 applyAttempt(attempt);
                 Node n = graph.getNodes().get(id);
-                onEvent.accept(StreamEvent.nodeDone(id, n.executorName(), n.getStatus().value()));
-                onEvent.accept(StreamEvent.observation(n.executorName(), "执行失败: " + n.getError()));
+                safeEmit(StreamEvent.nodeDone(id, n.executorName(), n.getStatus().value()));
+                if (n.getStatus() == NodeStatus.FAILED) {
+                    safeEmit(StreamEvent.observation(n.executorName(), "执行失败: " + n.getError()));
+                }
             }
         }
     }
@@ -358,11 +446,11 @@ public class GraphRuntime {
             RaceAttempt attempt = executeAttempt(nodeId, null);
             applyAttempt(attempt);
             Node node = graph.getNodes().get(nodeId);
-            onEvent.accept(StreamEvent.nodeDone(nodeId, node.executorName(), attempt.status.value()));
+            safeEmit(StreamEvent.nodeDone(nodeId, node.executorName(), attempt.status.value()));
             if (attempt.status == NodeStatus.DONE) {
-                onEvent.accept(StreamEvent.observation(node.executorName(), attempt.result));
+                safeEmit(StreamEvent.observation(node.executorName(), attempt.result));
             } else if (attempt.status == NodeStatus.FAILED) {
-                onEvent.accept(StreamEvent.observation(node.executorName(), "执行失败: " + attempt.err));
+                safeEmit(StreamEvent.observation(node.executorName(), "执行失败: " + attempt.err));
             }
         } finally {
             sem.release();
@@ -377,11 +465,11 @@ public class GraphRuntime {
         Node node = graph.getNodes().get(nodeId);
         if (node == null) return RaceAttempt.failed(nodeId, "节点不存在");
         String executor = node.executorName();
-        onEvent.accept(StreamEvent.nodeStart(nodeId, executor));
+        safeEmit(StreamEvent.nodeStart(nodeId, executor));
 
         // Thought + Action 步骤
-        onEvent.accept(StreamEvent.step(idAsInt(nodeId), node.getName()));
-        onEvent.accept(StreamEvent.toolCall(executor, node.getParams()));
+        safeEmit(StreamEvent.step(idAsInt(nodeId), node.getName()));
+        safeEmit(StreamEvent.toolCall(executor, node.getParams()));
 
         graph.setNodeStatus(nodeId, NodeStatus.RUNNING);
 
@@ -400,11 +488,14 @@ public class GraphRuntime {
 
         AppConfig.HarnessConfig h = appCfg.getHarness();
         int maxRetries = h == null ? 3 : h.getMaxRetries();
-        int retryDelay = h == null ? 200 : h.getRetryDelayMs();
+        int retryDelay = Math.max(0, h == null ? 200 : h.getRetryDelayMs());
 
         String result = null;
         String lastErr = null;
-        int maxAttempts = Math.max(1, maxRetries);
+        boolean retryable = node.getType() == NodeType.TOOL
+                && tools.get(node.getToolName()) != null
+                && tools.get(node.getToolName()).isRetryable();
+        int maxAttempts = retryable ? 1 + Math.max(0, maxRetries) : 1;
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             if (cancelled.get()) {
                 return RaceAttempt.cancelled(nodeId, "被用户中断");
@@ -422,7 +513,6 @@ public class GraphRuntime {
                 break;
             } catch (Exception e) {
                 lastErr = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-                graph.setNodeRetryCount(nodeId, attempt + 1);
                 if (cancelled.get()) {
                     return RaceAttempt.cancelled(nodeId, "被用户中断");
                 }
@@ -430,6 +520,7 @@ public class GraphRuntime {
                     return RaceAttempt.skipped(nodeId, "竞速取消");
                 }
                 if (attempt < maxAttempts - 1) {
+                    graph.setNodeRetryCount(nodeId, attempt + 1);
                     try { Thread.sleep(retryDelay); }
                     catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
@@ -455,13 +546,18 @@ public class GraphRuntime {
         if (node.getType() == NodeType.SUB_AGENT) {
             SubAgent sa = subAgents.get(node.getAgentName());
             Map<String, String> upstream = upstreamResults(node);
-            SubAgentTask task = new SubAgentTask(node.getId(), node.getGoal(), taskQuery, upstream);
+            SubAgentTask task = new SubAgentTask(node.getId(), node.getGoal(), taskQuery, ownerKey, upstream);
             return sa.run(task, cancelled);
         }
         Tool t = tools.get(node.getToolName());
         Map<String, Object> params = new HashMap<>();
         if (node.getParams() != null) {
             node.getParams().forEach((key, value) -> params.put(key, resolveParamValue(node, value)));
+        }
+        if (t.isExecutionContextAware()) {
+            params.put(Tool.CONTEXT_OWNER_KEY, ownerKey);
+            params.put(Tool.CONTEXT_SESSION_ID, sessionId);
+            params.put(Tool.CONTEXT_REQUEST_ID, requestId);
         }
         return t.getExecute().apply(params);
     }
@@ -489,10 +585,8 @@ public class GraphRuntime {
         int timeoutMs = h == null ? 5000 : h.getStepTimeoutMs();
         if (timeoutMs <= 0) return invoke(node);
 
-        FutureTask<String> task = new FutureTask<>(() -> invoke(node));
-        Thread worker = new Thread(task, "graph-invoke-" + node.getId());
-        worker.setDaemon(true);
-        worker.start();
+        Future<String> task = invocationExecutor.submit(() -> invoke(node));
+        activeInvocations.add(task);
         try {
             return task.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
@@ -507,6 +601,8 @@ public class GraphRuntime {
             if (cause instanceof Exception ex) throw ex;
             if (cause instanceof Error err) throw err;
             throw new RuntimeException(cause);
+        } finally {
+            activeInvocations.remove(task);
         }
     }
 
@@ -572,14 +668,17 @@ public class GraphRuntime {
             graph.setNodeError(nodeId, msg);
             errors.put(nodeId, msg);
         }
-        onEvent.accept(StreamEvent.nodeDone(nodeId, node.executorName(), NodeStatus.SKIPPED.value()));
-        onEvent.accept(StreamEvent.observation(node.executorName(), msg));
+        safeEmit(StreamEvent.nodeDone(nodeId, node.executorName(), NodeStatus.SKIPPED.value()));
+        safeEmit(StreamEvent.observation(node.executorName(), msg));
     }
 
     /** 把一次执行尝试原子地提交到图，竞速线程本身不直接提交终态。 */
     private void applyAttempt(RaceAttempt attempt) {
         if (attempt == null) return;
         synchronized (mu) {
+            Node node = graph.getNodes().get(attempt.id);
+            if (node != null && node.getStatus() == NodeStatus.CANCELLED
+                    && attempt.status != NodeStatus.CANCELLED) return;
             graph.setNodeStatus(attempt.id, attempt.status);
             if (attempt.status == NodeStatus.DONE) {
                 graph.setNodeResult(attempt.id, attempt.result);
@@ -603,12 +702,12 @@ public class GraphRuntime {
 
     /** 短暂回收协作式响应中断的竞速线程；不让不响应中断的工具阻塞整张图。 */
     private static void joinRaceThreads(Map<String, Thread> threads, long maxWaitMs) {
-        long deadline = System.currentTimeMillis() + Math.max(0, maxWaitMs);
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0, maxWaitMs));
         for (Thread t : threads.values()) {
-            long left = deadline - System.currentTimeMillis();
+            long left = deadline - System.nanoTime();
             if (left <= 0) return;
             try {
-                t.join(left);
+                t.join(Math.max(1, TimeUnit.NANOSECONDS.toMillis(left)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -624,6 +723,19 @@ public class GraphRuntime {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
+        }
+    }
+
+    private void cancelActiveInvocations() {
+        activeInvocations.forEach(future -> future.cancel(true));
+        activeInvocations.clear();
+    }
+
+    private void safeEmit(StreamEvent event) {
+        try {
+            onEvent.accept(event);
+        } catch (RuntimeException e) {
+            log.debug("GraphRuntime event consumer failed: {}", e.getMessage());
         }
     }
 

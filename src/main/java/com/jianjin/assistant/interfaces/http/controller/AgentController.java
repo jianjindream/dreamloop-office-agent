@@ -443,7 +443,7 @@ public class AgentController {
     /** GET /api/snapshots — 列出任务执行快照摘要 */
     @GetMapping("/snapshots")
     public List<Map<String, Object>> snapshots() {
-        List<Snapshot> snaps = agent.getSnapshots();
+        List<Snapshot> snaps = agent.getSnapshots(RequestIdentityHolder.current().ownerKey());
         List<Map<String, Object>> result = new ArrayList<>();
         for (int i = 0; i < snaps.size(); i++) {
             Snapshot snap = snaps.get(i);

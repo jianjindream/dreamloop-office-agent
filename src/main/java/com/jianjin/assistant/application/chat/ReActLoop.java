@@ -53,7 +53,7 @@ public class ReActLoop {
     public void run(ChatResponse resp, String query, Map<String, Tool> ts,
                     String memPrefix, List<Map<String, String>> histMsgs,
                     AtomicBoolean cancelled) {
-        runStream(resp, query, ts, memPrefix, histMsgs, cancelled, e -> {});
+        runStream(resp, query, ts, memPrefix, histMsgs, "default:default", cancelled, e -> {});
     }
 
     /**
@@ -62,6 +62,19 @@ public class ReActLoop {
      */
     public void runStream(ChatResponse resp, String query, Map<String, Tool> ts,
                           String memPrefix, List<Map<String, String>> histMsgs,
+                          AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
+        runStream(resp, query, ts, memPrefix, histMsgs, "default:default", cancelled, onEvent);
+    }
+
+    public void runStream(ChatResponse resp, String query, Map<String, Tool> ts,
+                          String memPrefix, List<Map<String, String>> histMsgs,
+                          String ownerKey, AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
+        runStream(resp, query, ts, memPrefix, histMsgs, ownerKey, "default", "", cancelled, onEvent);
+    }
+
+    public void runStream(ChatResponse resp, String query, Map<String, Tool> ts,
+                          String memPrefix, List<Map<String, String>> histMsgs,
+                          String ownerKey, String sessionId, String requestId,
                           AtomicBoolean cancelled, Consumer<StreamEvent> onEvent) {
         List<ReActStep> reactSteps = new ArrayList<>();
 
@@ -85,9 +98,15 @@ public class ReActLoop {
             tg = new TaskGraph(planNodes);
             tg.validate();
         } catch (Exception e) {
-            log.warn("TaskGraph 校验失败 ({})，降级为全并行执行", e.getMessage());
-            for (Node n : planNodes) n.setDependsOn(new ArrayList<>());
-            tg = new TaskGraph(planNodes);
+            log.warn("TaskGraph 校验失败 ({})，停止工具执行并降级为直接回答", e.getMessage());
+            String sp = ChatHistoryAdapter.buildSystemPrompt(memPrefix,
+                    "执行计划校验失败，禁止调用工具。请直接回答用户；不确定的事实要明确说明。计划错误：" + e.getMessage());
+            String answer = llm.chat(sp, histMsgs);
+            reactSteps.add(new ReActStep(ReActStep.THOUGHT, "执行计划无效，已停止工具执行"));
+            reactSteps.add(new ReActStep(ReActStep.FINAL_ANSWER, answer));
+            resp.setAnswer(answer);
+            resp.setSteps(reactSteps);
+            return;
         }
 
         // 兼容旧 Snapshot/SSE：把图节点平展成 TaskStep
@@ -97,16 +116,15 @@ public class ReActLoop {
         currentTask.setStatus("running");
         currentTask.setPhase("executing");
         currentTask.setSteps(graphToTaskSteps(tg));
-        snapshots.clear();
-        snapshots.save(currentTask);
+        snapshots.save(ownerKey, currentTask);
 
         // ── Step 3: GraphRuntime 并行/竞速执行 ──────────────────────────────
         GraphRuntime rt = new GraphRuntime(tg, cfg, GraphRuntime.Config.from(cfg),
-                ts, subAgents, query, cancelled, onEvent);
+                ts, subAgents, query, ownerKey, sessionId, requestId, cancelled, onEvent);
         GraphRuntime.GraphResult gr = rt.execute();
         // 同步图状态回 TaskState（保留旧的快照视图）
         syncGraphIntoTaskSteps(tg, currentTask);
-        snapshots.save(currentTask);
+        snapshots.save(ownerKey, currentTask);
         reactSteps.addAll(graphResultToReActSteps(tg));
 
         // ── Step 4: 中断检查 ─────────────────────────────────────────────
@@ -118,6 +136,7 @@ public class ReActLoop {
             resp.setSteps(reactSteps);
             resp.setTask(currentTask);
             resp.setInterrupted(true);
+            snapshots.save(ownerKey, currentTask);
             return;
         }
 
@@ -131,6 +150,7 @@ public class ReActLoop {
         resp.setAnswer(answer);
         resp.setSteps(reactSteps);
         resp.setTask(currentTask);
+        snapshots.save(ownerKey, currentTask);
     }
 
     // ─────────────────────────── Graph ↔ TaskStep 适配 ───────────────────────────

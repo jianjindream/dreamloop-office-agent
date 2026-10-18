@@ -61,7 +61,7 @@ public final class BuiltinSubAgents {
             for (String q : queries) {
                 if (cancelled != null && cancelled.get()) break;
                 if (rag != null && rag.isLoaded()) {
-                    RagService.QueryResult qr = rag.query(q);
+                    RagService.QueryResult qr = rag.queryWithHistory(task.ownerKey, q, null);
                     observations.add("Query: " + q + "\nRAG Answer: " + qr.answer);
                     if (qr.results != null) {
                         for (RagService.ScoredChunk sc : qr.results) {
@@ -208,6 +208,7 @@ public final class BuiltinSubAgents {
             Map<String, Object> meta = new LinkedHashMap<>();
             meta.put("sub_agent", name());
             meta.put("task_id", task.id);
+            meta.put("owner_key", task.ownerKey);
             String review = SubAgentSupport.upstreamByAgent(task, "review_agent");
             if (review != null) meta.put("review", SubAgentSupport.firstRunes(review, 1200));
             return meta;

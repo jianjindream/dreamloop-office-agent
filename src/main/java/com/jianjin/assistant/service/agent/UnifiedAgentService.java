@@ -161,15 +161,20 @@ public class UnifiedAgentService {
         // rag_search 工具
         tools.put("rag_search", new Tool("rag_search", "从私人黑洞（个人知识库）中检索相关文档内容",
                 List.of(new ToolParam("query", "string", "检索关键词或问题", true)),
+                true,
+                true,
                 params -> {
                     String q = params.get("query") != null ? params.get("query").toString() : "相关内容";
+                    String ownerKey = params.get(Tool.CONTEXT_OWNER_KEY) == null
+                            ? "default:default" : params.get(Tool.CONTEXT_OWNER_KEY).toString();
                     if (!rag.isLoaded()) throw new RuntimeException("知识库为空，请先在「私人黑洞」上传文档");
-                    return rag.queryWithHistory(RequestIdentityHolder.current().ownerKey(), q, null).answer;
+                    return rag.queryWithHistory(ownerKey, q, null).answer;
                 }));
 
         // search_web 工具（Tavily + LLM fallback）
         tools.put("search_web", new Tool("search_web", "搜索互联网获取最新信息",
                 List.of(new ToolParam("query", "string", "搜索关键词", true)),
+                true,
                 params -> {
                     String q = params.get("query") != null ? params.get("query").toString() : "";
                     if (q.isEmpty()) throw new RuntimeException("搜索关键词不能为空");
@@ -346,7 +351,8 @@ public class UnifiedAgentService {
         onEvent.accept(StreamEvent.mode(mode));
 
         switch (mode) {
-            case "react" -> reactLoop.runStream(resp, query, toolset, memPrefix, histMsgs, cancelled, onEvent);
+            case "react" -> reactLoop.runStream(resp, query, toolset, memPrefix, histMsgs,
+                    scope.userId(), scope.sessionId(), "", cancelled, onEvent);
             case "tool" -> new ToolModeHandler(llm, toolService, pref).run(resp, query, toolset, memPrefix, histMsgs);
             case "rag" -> {
                 RagService.QueryResult qr = rag.queryWithHistory(
@@ -415,6 +421,9 @@ public class UnifiedAgentService {
     public PreferenceMemory getPreferences(String userId) { return memorySpaces.user(MemoryScope.from(userId, null).userId()).preferences(); }
     public List<Snapshot> getSnapshots() {
         return snapshotManager == null ? new ArrayList<>() : snapshotManager.snapshots();
+    }
+    public List<Snapshot> getSnapshots(String ownerKey) {
+        return snapshotManager == null ? new ArrayList<>() : snapshotManager.snapshots(ownerKey);
     }
     public RagService getRagService() { return rag; }
     public KGStore getKnowledgeGraph() { return kg; }

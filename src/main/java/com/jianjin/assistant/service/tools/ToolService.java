@@ -38,6 +38,7 @@ public class ToolService {
     private Tool createGetTimeTool() {
         return new Tool("get_time", "获取当前时间",
                 List.of(new ToolParam("timezone", "string", "时区（如 Asia/Tokyo）", false)),
+                true,
                 params -> {
                     String tz = params.get("timezone") != null ? params.get("timezone").toString() : "";
                     ZoneId zone = ZoneId.systemDefault();
@@ -51,6 +52,7 @@ public class ToolService {
     private Tool createGetWeatherTool() {
         return new Tool("get_weather", "获取城市天气信息",
                 List.of(new ToolParam("city", "string", "城市名称", true)),
+                true,
                 params -> {
                     String city = params.get("city") != null ? params.get("city").toString() : "北京";
                     String weather = WEATHER_DB.getOrDefault(city, "晴天 20°C（模拟）");
@@ -61,6 +63,7 @@ public class ToolService {
     private Tool createSearchWebTool() {
         return new Tool("search_web", "搜索互联网获取最新信息",
                 List.of(new ToolParam("query", "string", "搜索关键词", true)),
+                true,
                 params -> {
                     String q = params.get("query") != null ? params.get("query").toString() : "";
                     // Mock search results

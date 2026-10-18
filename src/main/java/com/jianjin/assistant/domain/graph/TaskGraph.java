@@ -3,8 +3,10 @@ package com.jianjin.assistant.domain.graph;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class TaskGraph {
 
@@ -19,7 +21,15 @@ public class TaskGraph {
 
     public TaskGraph(List<Node> all) {
         if (all == null) return;
+        Set<String> ids = new LinkedHashSet<>();
         for (Node n : all) {
+            if (n == null) throw new IllegalStateException("task graph contains null node");
+            if (n.getId() == null || n.getId().isBlank()) {
+                throw new IllegalStateException("task graph contains node with blank id");
+            }
+            if (!ids.add(n.getId())) {
+                throw new IllegalStateException("task graph contains duplicate node id " + n.getId());
+            }
             n.setStatus(NodeStatus.PENDING);
             nodes.put(n.getId(), n);
             adjList.put(n.getId(), new ArrayList<>());
@@ -66,17 +76,34 @@ public class TaskGraph {
             throw new IllegalStateException(
                     "task graph has cycle: processed " + processed + "/" + nodes.size() + " nodes");
         }
-        levelsCache = levels;
-        return levels;
+        levelsCache = levels.stream().map(List::copyOf).toList();
+        return levelsCache;
     }
 
     /** 校验图：悬空依赖 + 环检测。出错时抛 {@link IllegalStateException}。 */
     public void validate() {
         for (Node n : nodes.values()) {
+            Set<String> uniqueDependencies = new LinkedHashSet<>();
             for (String dep : n.getDependsOn()) {
+                if (!uniqueDependencies.add(dep)) {
+                    throw new IllegalStateException(
+                            "node " + n.getId() + " contains duplicate dependency " + dep);
+                }
                 if (!nodes.containsKey(dep)) {
                     throw new IllegalStateException(
                             "node " + n.getId() + " depends on nonexistent node " + dep);
+                }
+            }
+        }
+        for (Map.Entry<String, List<String>> entry : raceGroups().entrySet()) {
+            Set<String> expected = null;
+            for (String id : entry.getValue()) {
+                Set<String> dependencies = new LinkedHashSet<>(nodes.get(id).getDependsOn());
+                if (expected == null) {
+                    expected = dependencies;
+                } else if (!expected.equals(dependencies)) {
+                    throw new IllegalStateException(
+                            "race group " + entry.getKey() + " must use identical dependencies");
                 }
             }
         }

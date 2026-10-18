@@ -14,9 +14,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -276,5 +278,143 @@ class GraphRuntimeTest {
         assertEquals(NodeStatus.SKIPPED, slow.getStatus());
         assertEquals(NodeStatus.DONE, consumer.getStatus());
         assertEquals("received:winner-value", consumer.getResult());
+    }
+
+    @Test
+    void downstreamStartsWithoutWaitingForUnrelatedSlowPeer() {
+        CountDownLatch downstreamRan = new CountDownLatch(1);
+        AtomicBoolean slowWasReleasedByDownstream = new AtomicBoolean(false);
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("slow", new Tool("slow", "", List.of(), params -> {
+            try {
+                slowWasReleasedByDownstream.set(downstreamRan.await(1, TimeUnit.SECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return "slow";
+        }));
+        tools.put("fast", new Tool("fast", "", List.of(), params -> "fast"));
+        tools.put("downstream", new Tool("downstream", "", List.of(), params -> {
+            downstreamRan.countDown();
+            return "downstream";
+        }));
+
+        Node slow = new Node("n1", NodeType.TOOL, "slow", "slow", new HashMap<>(), List.of(), "");
+        Node fast = new Node("n2", NodeType.TOOL, "fast", "fast", new HashMap<>(), List.of(), "");
+        Node downstream = new Node("n3", NodeType.TOOL, "downstream", "downstream",
+                new HashMap<>(), List.of("n2"), "");
+
+        new GraphRuntime(new TaskGraph(List.of(slow, fast, downstream)), minimalCfg(),
+                GraphRuntime.Config.from(minimalCfg()), tools, new AtomicBoolean(false), e -> {}).execute();
+
+        assertTrue(slowWasReleasedByDownstream.get(),
+                "downstream should start as soon as its own dependency completes");
+        assertEquals(NodeStatus.DONE, downstream.getStatus());
+    }
+
+    @Test
+    void nonRetryableToolIsNeverRepeated() {
+        AppConfig cfg = minimalCfg();
+        cfg.getHarness().setMaxRetries(3);
+        AtomicInteger calls = new AtomicInteger();
+        Tool sideEffect = new Tool("side-effect", "", List.of(), params -> {
+            calls.incrementAndGet();
+            throw new RuntimeException("failed after side effect");
+        });
+        Node node = new Node("n1", NodeType.TOOL, "side-effect", "side-effect",
+                new HashMap<>(), List.of(), "");
+
+        new GraphRuntime(new TaskGraph(List.of(node)), cfg, GraphRuntime.Config.from(cfg),
+                Map.of("side-effect", sideEffect), new AtomicBoolean(false), e -> {}).execute();
+
+        assertEquals(1, calls.get());
+        assertEquals(0, node.getRetryCount());
+        assertEquals(NodeStatus.FAILED, node.getStatus());
+    }
+
+    @Test
+    void retryableToolUsesInitialAttemptPlusConfiguredRetries() {
+        AppConfig cfg = minimalCfg();
+        cfg.getHarness().setMaxRetries(2);
+        AtomicInteger calls = new AtomicInteger();
+        Tool retryable = new Tool("retryable", "", List.of(), true, params -> {
+            if (calls.incrementAndGet() < 3) throw new RuntimeException("transient");
+            return "ok";
+        });
+        Node node = new Node("n1", NodeType.TOOL, "retryable", "retryable",
+                new HashMap<>(), List.of(), "");
+
+        new GraphRuntime(new TaskGraph(List.of(node)), cfg, GraphRuntime.Config.from(cfg),
+                Map.of("retryable", retryable), new AtomicBoolean(false), e -> {}).execute();
+
+        assertEquals(3, calls.get());
+        assertEquals(2, node.getRetryCount());
+        assertEquals(NodeStatus.DONE, node.getStatus());
+    }
+
+    @Test
+    void executionContextIsPassedOnlyToContextAwareTools() {
+        AtomicReference<Object> owner = new AtomicReference<>();
+        AtomicReference<Object> plainOwner = new AtomicReference<>();
+        Tool scoped = new Tool("scoped", "", List.of(), false, true,
+                params -> { owner.set(params.get(Tool.CONTEXT_OWNER_KEY)); return "ok"; });
+        Tool plain = new Tool("plain", "", List.of(),
+                params -> { plainOwner.set(params.get(Tool.CONTEXT_OWNER_KEY)); return "ok"; });
+        Node first = new Node("n1", NodeType.TOOL, "scoped", "scoped",
+                new HashMap<>(), List.of(), "");
+        Node second = new Node("n2", NodeType.TOOL, "plain", "plain",
+                new HashMap<>(), List.of(), "");
+
+        new GraphRuntime(new TaskGraph(List.of(first, second)), minimalCfg(),
+                GraphRuntime.Config.from(minimalCfg()), Map.of("scoped", scoped, "plain", plain),
+                null, "query", "workspace:user", new AtomicBoolean(false), e -> {}).execute();
+
+        assertEquals("workspace:user", owner.get());
+        assertNull(plainOwner.get());
+    }
+
+    @Test
+    void cancellationInterruptsRaceWithoutWaitingForRaceTimeout() throws Exception {
+        AppConfig cfg = minimalCfg();
+        cfg.getGraph().setRaceTimeoutMs(5000);
+        cfg.getHarness().setStepTimeoutMs(5000);
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        CountDownLatch started = new CountDownLatch(2);
+        Map<String, Tool> tools = new HashMap<>();
+        for (String name : List.of("left", "right")) {
+            tools.put(name, new Tool(name, "", List.of(), params -> {
+                started.countDown();
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("interrupted");
+                }
+                return name;
+            }));
+        }
+        Node left = new Node("n1", NodeType.TOOL, "left", "left",
+                new HashMap<>(), List.of(), "search");
+        Node right = new Node("n2", NodeType.TOOL, "right", "right",
+                new HashMap<>(), List.of(), "search");
+        Thread canceller = Thread.ofVirtual().start(() -> {
+            try {
+                started.await(1, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            cancelled.set(true);
+        });
+
+        long startedAt = System.nanoTime();
+        GraphRuntime.GraphResult result = new GraphRuntime(new TaskGraph(List.of(left, right)), cfg,
+                GraphRuntime.Config.from(cfg), tools, cancelled, e -> {}).execute();
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        canceller.join();
+
+        assertTrue(result.interrupted);
+        assertTrue(elapsedMs < 1500, "cancellation should not wait for the 5 second race timeout");
+        assertEquals(NodeStatus.CANCELLED, left.getStatus());
+        assertEquals(NodeStatus.CANCELLED, right.getStatus());
     }
 }
