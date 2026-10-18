@@ -16,6 +16,8 @@ public class Tool {
     private String endpoint;
     private boolean retryable;
     private boolean executionContextAware;
+    /** 只读、幂等且能安全响应中断的工具，才允许进入竞速组。 */
+    private boolean raceSafe;
     private transient Function<Map<String, Object>, String> execute;
 
     public Tool() {}
@@ -49,6 +51,8 @@ public class Tool {
     public void setRetryable(boolean retryable) { this.retryable = retryable; }
     public boolean isExecutionContextAware() { return executionContextAware; }
     public void setExecutionContextAware(boolean executionContextAware) { this.executionContextAware = executionContextAware; }
+    public boolean isRaceSafe() { return raceSafe; }
+    public void setRaceSafe(boolean raceSafe) { this.raceSafe = raceSafe; }
     public Function<Map<String, Object>, String> getExecute() { return execute; }
     public void setExecute(Function<Map<String, Object>, String> execute) { this.execute = execute; }
 }

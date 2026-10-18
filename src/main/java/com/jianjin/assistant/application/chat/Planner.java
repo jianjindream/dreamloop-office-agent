@@ -171,7 +171,10 @@ public class Planner {
                 - 工具节点填写 tool 和 params；子 Agent 节点填写 agent 和 goal
                 - 如果节点 B 需要节点 A 的输出，则 B 的 depends_on 包含 A 的 id
                 - 工具参数需要引用上游结果时，使用 {{节点id.result}}，例如 {"text":"{{n1.result}}"}
-                - 如果两个工具功能类似（如多个搜索源），设相同的 race_group，系统会并行执行谁先返回用谁
+                - 只有只读、可安全取消且输出用途相同的检索工具才可设置相同 race_group
+                - race_group 使用 first-qualified 语义：最快返回但内容为空或无有效信息的结果不会获胜
+                - 内部/私有知识优先使用 rag_search；实时信息优先使用 search_web
+                - 需要同时利用内部资料和外部信息的研究、比较、分析任务不要设置 race_group，应并行执行后聚合
                 - 无依赖关系的节点不要互相等待，depends_on 设为 []
                 - 需要研究、总结、报告、写文档时，优先使用 research_agent / writer_agent / review_agent / doc_agent 组合
                 - doc_agent 负责把上游内容保存到本地文档库并写入 RAG
@@ -355,11 +358,17 @@ public class Planner {
             nodes.add(new Node(nextID.get(), NodeType.TOOL, "查询" + city + "天气", "get_weather",
                     new HashMap<>(Map.of("city", city)), new ArrayList<>(), ""));
         }
-        if (ts.containsKey("search_web")
+        boolean internalKnowledge = isInternalKnowledgeQuery(q);
+        boolean realtime = isRealtimeQuery(q);
+        boolean complementary = isComplementaryRetrievalQuery(q);
+        boolean searchRace = !internalKnowledge && !realtime && !complementary
+                && ts.containsKey("search_web") && ts.containsKey("rag_search");
+
+        if (ts.containsKey("search_web") && (!internalKnowledge || complementary)
                 && (q.contains("搜索") || q.contains("查询") || q.contains("介绍")
                     || q.contains("是什么") || q.contains("怎么") || q.contains("如何"))) {
             nodes.add(new Node(nextID.get(), NodeType.TOOL, "搜索相关信息", "search_web",
-                    new HashMap<>(Map.of("query", query)), new ArrayList<>(), "search"));
+                    new HashMap<>(Map.of("query", query)), new ArrayList<>(), searchRace ? "search" : ""));
         }
         if (ts.containsKey("exec_command")
                 && (q.contains("执行") || q.contains("运行") || q.contains("命令")
@@ -368,10 +377,10 @@ public class Planner {
             nodes.add(new Node(nextID.get(), NodeType.TOOL, "执行终端命令", "exec_command",
                     new HashMap<>(Map.of("command", query)), new ArrayList<>(), ""));
         }
-        if (ts.containsKey("rag_search")) {
-            // 与 search_web 同 race_group → 优先取先返回的检索结果
+        if (ts.containsKey("rag_search") && (!realtime || complementary)) {
+            // 仅通用快速查询与 Web 做质量门控竞速；内部、实时、复杂问题走来源优先或并行聚合。
             nodes.add(new Node(nextID.get(), NodeType.TOOL, "检索个人知识库", "rag_search",
-                    new HashMap<>(Map.of("query", query)), new ArrayList<>(), "search"));
+                    new HashMap<>(Map.of("query", query)), new ArrayList<>(), searchRace ? "search" : ""));
         }
         // 其余 MCP / 自定义工具（无规则匹配的）按"独立并行 + query 兜底"加入
         java.util.Set<String> builtins = java.util.Set.of(
@@ -404,5 +413,24 @@ public class Planner {
         return q.contains("保存") || q.contains("落库") || q.contains("写入") ||
                q.contains("文档库") || q.contains("知识库") ||
                q.contains("生成报告") || q.contains("报告");
+    }
+
+    static boolean isInternalKnowledgeQuery(String q) {
+        if (q == null) return false;
+        return q.contains("知识库") || q.contains("私人黑洞") || q.contains("我上传")
+                || q.contains("内部文档") || q.contains("公司文档") || q.contains("我的资料");
+    }
+
+    static boolean isRealtimeQuery(String q) {
+        if (q == null) return false;
+        return q.contains("最新") || q.contains("实时") || q.contains("今天")
+                || q.contains("刚刚") || q.contains("新闻") || q.contains("当前价格")
+                || q.contains("股价");
+    }
+
+    static boolean isComplementaryRetrievalQuery(String q) {
+        if (q == null) return false;
+        return q.contains("结合") || q.contains("综合") || q.contains("对比")
+                || q.contains("比较") || q.contains("交叉验证") || needsSubAgentPlan(q);
     }
 }

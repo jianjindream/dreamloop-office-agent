@@ -93,6 +93,13 @@ app:
     retry-delay-ms: 200
     step-timeout-ms: 5000
     max-iterations: 5
+  graph:
+    max-parallel: 2
+    race-timeout-ms: 30000
+    # 首个合格检索结果出现后，短暂等待可能质量更高的候选。
+    race-grace-ms: 150
+    race-min-result-chars: 12
+    enable-racing: true
   search:
     api-key: "${TAVILY_API_KEY:}"
     api-url: "https://api.tavily.com/search"

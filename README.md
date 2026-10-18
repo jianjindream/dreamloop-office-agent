@@ -149,6 +149,11 @@ docker compose up -d --build
 | `app.rag.rerank.enabled` | `false` | 是否启用 LLM 精排 |
 | `app.memory.short-term-max-turns` | `10` | 短期记忆最大轮数 |
 | `app.harness.max-iterations` | `5` | ReAct 最大迭代数 |
+| `app.graph.max-parallel` | `2` | DAG 工具调用的最大并行度 |
+| `app.graph.race-timeout-ms` | `30000` | 竞速检索的整体超时时间 |
+| `app.graph.race-grace-ms` | `150` | 首个合格结果出现后的短暂择优窗口 |
+| `app.graph.race-min-result-chars` | `12` | 检索结果通过基础质量门控的最小字符数 |
+| `app.graph.enable-racing` | `true` | 是否启用安全工具的质量门控竞速 |
 | `app.sandbox.backend` | `docker` | `docker`、`local` 或 `mock` |
 | `app.sandbox.image` | `alpine:3.19` | Docker 沙箱镜像；生产环境建议通过 `APP_SANDBOX_IMAGE` 固定为镜像摘要 |
 | `app.sandbox.max-concurrent-executions` | `4` | 全局同时运行的沙箱命令上限 |

@@ -90,10 +90,18 @@ public class StreamEvent {
 
     /** 竞速胜出：data = {race_group, winner, tool} */
     public static StreamEvent raceWon(String raceGroup, String winner, String tool) {
+        return raceWon(raceGroup, winner, tool, 0.0, "first_success");
+    }
+
+    /** 竞速胜出，附带质量分和选择原因，便于前端展示与运行指标统计。 */
+    public static StreamEvent raceWon(String raceGroup, String winner, String tool,
+                                      double qualityScore, String reason) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("race_group", raceGroup == null ? "" : raceGroup);
         m.put("winner", winner == null ? "" : winner);
         m.put("tool", tool == null ? "" : tool);
+        m.put("quality_score", qualityScore);
+        m.put("reason", reason == null ? "" : reason);
         return new StreamEvent("race_won", m);
     }
 }

@@ -389,12 +389,20 @@ public class AppConfig {
     public static class GraphConfig {
         private int maxParallel = 2;
         private int raceTimeoutMs = 30000;
+        /** 首个合格结果返回后，继续等待更优结果的短暂窗口。 */
+        private int raceGraceMs = 150;
+        /** 检索结果达到该长度才视为“合格”；非空短结果仍可作为 best-effort 兜底。 */
+        private int raceMinResultChars = 12;
         private boolean enableRacing = true;
 
         public int getMaxParallel() { return maxParallel; }
         public void setMaxParallel(int maxParallel) { this.maxParallel = maxParallel; }
         public int getRaceTimeoutMs() { return raceTimeoutMs; }
         public void setRaceTimeoutMs(int raceTimeoutMs) { this.raceTimeoutMs = raceTimeoutMs; }
+        public int getRaceGraceMs() { return raceGraceMs; }
+        public void setRaceGraceMs(int raceGraceMs) { this.raceGraceMs = raceGraceMs; }
+        public int getRaceMinResultChars() { return raceMinResultChars; }
+        public void setRaceMinResultChars(int raceMinResultChars) { this.raceMinResultChars = raceMinResultChars; }
         public boolean isEnableRacing() { return enableRacing; }
         public void setEnableRacing(boolean enableRacing) { this.enableRacing = enableRacing; }
     }

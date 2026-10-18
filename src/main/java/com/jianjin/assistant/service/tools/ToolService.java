@@ -61,7 +61,7 @@ public class ToolService {
     }
 
     private Tool createSearchWebTool() {
-        return new Tool("search_web", "搜索互联网获取最新信息",
+        Tool tool = new Tool("search_web", "搜索互联网获取最新信息",
                 List.of(new ToolParam("query", "string", "搜索关键词", true)),
                 true,
                 params -> {
@@ -75,6 +75,8 @@ public class ToolService {
                     }
                     return String.format("关于「%s」的搜索结果（模拟）", q);
                 });
+        tool.setRaceSafe(true);
+        return tool;
     }
 
     /**

@@ -177,6 +177,7 @@ public class UnifiedAgentService {
                     if (!rag.isLoaded()) throw new RuntimeException("知识库为空，请先在「私人黑洞」上传文档");
                     return rag.queryWithHistory(ownerKey, q, null).answer;
                 }));
+        tools.get("rag_search").setRaceSafe(true);
 
         // search_web 工具（Tavily + LLM fallback）
         tools.put("search_web", new Tool("search_web", "搜索互联网获取最新信息",
@@ -194,6 +195,7 @@ public class UnifiedAgentService {
                             "你是一个知识丰富的搜索引擎助手。请基于你的知识，对用户的搜索问题给出准确、详细的回答。直接给出答案，不要说「我不知道」或「我无法搜索」。",
                             List.of(Map.of("role", "user", "content", "搜索：" + q)));
                 }));
+        tools.get("search_web").setRaceSafe(true);
 
         restoreRAGFromDB();
         initKnowledgeGraph();

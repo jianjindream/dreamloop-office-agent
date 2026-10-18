@@ -127,7 +127,12 @@ const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
       chat.completeLatestTool(messageId, String(data.tool ?? ''), `执行状态：${String(data.status ?? 'done')}`)
       break
     case 'race_won':
-      chat.addExecution(messageId, { type: 'race', title: `${String(data.tool ?? '任务')} 返回了最佳结果`, detail: `执行节点 ${String(data.winner ?? '')}`, status: 'success' })
+      chat.addExecution(messageId, {
+        type: 'race',
+        title: `${String(data.tool ?? '任务')} 通过质量门控并胜出`,
+        detail: `执行节点 ${String(data.winner ?? '')} · 质量分 ${Number(data.quality_score ?? 0).toFixed(2)} · ${String(data.reason ?? '')}`,
+        status: 'success',
+      })
       break
     case 'done': {
       const response = event.data as ChatResponse

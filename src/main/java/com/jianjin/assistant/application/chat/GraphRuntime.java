@@ -43,17 +43,26 @@ public class GraphRuntime {
     public static class Config {
         public final int maxParallel;
         public final int raceTimeoutMs;
+        public final int raceGraceMs;
+        public final int raceMinResultChars;
         public final boolean enableRacing;
         public Config(int maxParallel, int raceTimeoutMs, boolean enableRacing) {
+            this(maxParallel, raceTimeoutMs, 150, 12, enableRacing);
+        }
+        public Config(int maxParallel, int raceTimeoutMs, int raceGraceMs,
+                      int raceMinResultChars, boolean enableRacing) {
             this.maxParallel = maxParallel <= 0 ? 2 : maxParallel;
             this.raceTimeoutMs = raceTimeoutMs <= 0 ? 30000 : raceTimeoutMs;
+            this.raceGraceMs = Math.max(0, raceGraceMs);
+            this.raceMinResultChars = Math.max(1, raceMinResultChars);
             this.enableRacing = enableRacing;
         }
-        public static Config defaults() { return new Config(2, 30000, true); }
+        public static Config defaults() { return new Config(2, 30000, 150, 12, true); }
         public static Config from(AppConfig cfg) {
             AppConfig.GraphConfig g = cfg.getGraph();
             if (g == null) return defaults();
-            return new Config(g.getMaxParallel(), g.getRaceTimeoutMs(), g.isEnableRacing());
+            return new Config(g.getMaxParallel(), g.getRaceTimeoutMs(), g.getRaceGraceMs(),
+                    g.getRaceMinResultChars(), g.isEnableRacing());
         }
     }
 
@@ -238,11 +247,22 @@ public class GraphRuntime {
 
     private Map<String, ExecutionUnit> buildExecutionUnits() {
         Map<String, List<String>> raceGroups = graph.raceGroups();
+        Set<String> eligibleRaceGroups = new HashSet<>();
+        for (Map.Entry<String, List<String>> entry : raceGroups.entrySet()) {
+            boolean eligible = entry.getValue().size() > 1 && entry.getValue().stream()
+                    .map(graph.getNodes()::get)
+                    .allMatch(this::isRaceEligible);
+            if (eligible) {
+                eligibleRaceGroups.add(entry.getKey());
+            } else if (entry.getValue().size() > 1) {
+                log.warn("GraphRuntime: 竞速组 {} 含不可安全竞速的执行体，降级为普通并行", entry.getKey());
+            }
+        }
         Map<String, ExecutionUnit> units = new LinkedHashMap<>();
         Map<String, String> nodeToUnit = new HashMap<>();
         for (Node node : graph.getNodes().values()) {
             boolean racing = cfg.enableRacing && !node.getRaceGroup().isEmpty()
-                    && raceGroups.getOrDefault(node.getRaceGroup(), List.of()).size() > 1;
+                    && eligibleRaceGroups.contains(node.getRaceGroup());
             String unitId = racing ? "race:" + node.getRaceGroup() : "node:" + node.getId();
             ExecutionUnit unit = units.computeIfAbsent(unitId,
                     ignored -> new ExecutionUnit(unitId, racing ? node.getRaceGroup() : ""));
@@ -260,6 +280,12 @@ public class GraphRuntime {
             }
         }
         return units;
+    }
+
+    private boolean isRaceEligible(Node node) {
+        if (node == null || node.getType() != NodeType.TOOL || tools == null) return false;
+        Tool tool = tools.get(node.getToolName());
+        return tool != null && tool.isRaceSafe();
     }
 
     private void submitUnit(ExecutionUnit unit, CompletionService<String> completions,
@@ -299,7 +325,7 @@ public class GraphRuntime {
         return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
     }
 
-    // ─────────────── 竞速执行（First-success-wins） ───────────────
+    // ─────────────── 竞速执行（First-qualified / bounded-best） ───────────────
 
     private static class RaceGroup {
         final String raceGroup;
@@ -345,12 +371,17 @@ public class GraphRuntime {
 
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(cfg.raceTimeoutMs);
         Map<String, RaceAttempt> attempts = new LinkedHashMap<>();
-        RaceAttempt winner = null;
+        Map<String, RaceEvaluation> evaluations = new LinkedHashMap<>();
+        RaceAttempt qualifiedWinner = null;
+        RaceAttempt bestEffort = null;
+        long qualifiedDeadline = Long.MAX_VALUE;
         int collected = 0;
         try {
             while (collected < g.nodeIds.size()) {
                 if (cancelled.get()) break;
-                long left = deadline - System.nanoTime();
+                long now = System.nanoTime();
+                long effectiveDeadline = Math.min(deadline, qualifiedDeadline);
+                long left = effectiveDeadline - now;
                 if (left <= 0) break;
                 RaceAttempt r = ch.poll(Math.min(left, TimeUnit.MILLISECONDS.toNanos(100)),
                         TimeUnit.NANOSECONDS);
@@ -358,10 +389,21 @@ public class GraphRuntime {
                 collected++;
                 attempts.put(r.id, r);
                 if (r.status == NodeStatus.DONE) {
-                    winner = r;
-                    raceClosed.set(true);
-                    interruptRaceLosers(threads, r.id);
-                    break;
+                    RaceEvaluation evaluation = evaluateRaceResult(r);
+                    evaluations.put(r.id, evaluation);
+                    if (evaluation.usable && betterRaceCandidate(r, bestEffort, evaluations)) {
+                        bestEffort = r;
+                    }
+                    if (evaluation.qualified) {
+                        if (qualifiedWinner == null) {
+                            qualifiedDeadline = Math.min(deadline, System.nanoTime()
+                                    + TimeUnit.MILLISECONDS.toNanos(cfg.raceGraceMs));
+                        }
+                        if (betterRaceCandidate(r, qualifiedWinner, evaluations)) {
+                            qualifiedWinner = r;
+                        }
+                        if (cfg.raceGraceMs == 0) break;
+                    }
                 }
             }
         } catch (InterruptedException ignored) {
@@ -369,16 +411,23 @@ public class GraphRuntime {
         } finally {
             // 无论胜出、全部失败还是超时，都关闭竞速，避免迟到线程回写节点状态。
             raceClosed.set(true);
-            interruptRaceLosers(threads, winner == null ? null : winner.id);
+            RaceAttempt selected = qualifiedWinner != null ? qualifiedWinner : bestEffort;
+            interruptRaceLosers(threads, selected == null ? null : selected.id);
             joinRaceThreads(threads, 200);
         }
+
+        // 首选通过质量门控的结果；没有合格结果时，允许非空弱结果作为 best-effort 兜底。
+        RaceAttempt winner = qualifiedWinner != null ? qualifiedWinner : bestEffort;
 
         // 结算：未胜出节点 → 标 SKIPPED；都失败 → FAILED
         if (winner != null) {
             Node winnerNode = graph.getNodes().get(winner.id);
+            RaceEvaluation winnerEvaluation = evaluations.get(winner.id);
             applyAttempt(winner);
             safeEmit(StreamEvent.nodeDone(winner.id, winnerNode.executorName(), NodeStatus.DONE.value()));
-            safeEmit(StreamEvent.raceWon(g.raceGroup, winner.id, winnerNode.executorName()));
+            safeEmit(StreamEvent.raceWon(g.raceGroup, winner.id, winnerNode.executorName(),
+                    winnerEvaluation == null ? 0.0 : winnerEvaluation.score,
+                    winnerEvaluation == null ? "first_success" : winnerEvaluation.reason));
             safeEmit(StreamEvent.observation(winnerNode.executorName(), winner.result));
             for (String id : g.nodeIds) {
                 Node n = graph.getNodes().get(id);
@@ -398,6 +447,10 @@ public class GraphRuntime {
                     attempt = RaceAttempt.cancelled(id, "被用户中断");
                 } else if (attempt == null || attempt.status == NodeStatus.SKIPPED) {
                     attempt = RaceAttempt.failed(id, "竞速超时（" + cfg.raceTimeoutMs + "ms）");
+                } else if (attempt.status == NodeStatus.DONE) {
+                    RaceEvaluation evaluation = evaluations.get(id);
+                    attempt = RaceAttempt.failed(id, "竞速结果未通过质量门控: "
+                            + (evaluation == null ? "unusable_result" : evaluation.reason));
                 }
                 applyAttempt(attempt);
                 Node n = graph.getNodes().get(id);
@@ -432,6 +485,68 @@ public class GraphRuntime {
         static RaceAttempt skipped(String id, String err) {
             return new RaceAttempt(id, NodeStatus.SKIPPED, "", err);
         }
+    }
+
+    private static class RaceEvaluation {
+        final boolean usable;
+        final boolean qualified;
+        final double score;
+        final String reason;
+
+        RaceEvaluation(boolean usable, boolean qualified, double score, String reason) {
+            this.usable = usable;
+            this.qualified = qualified;
+            this.score = score;
+            this.reason = reason;
+        }
+    }
+
+    /**
+     * 检索竞速不能把“调用成功”等同于“结果可用”。当前工具接口仍返回字符串，
+     * 因此先用保守的通用门控过滤空结果/明确的无结果文案，并用内容量和证据特征
+     * 做轻量评分。后续若工具升级为结构化 RetrievalResult，可在这里替换评分器。
+     */
+    private RaceEvaluation evaluateRaceResult(RaceAttempt attempt) {
+        String result = attempt == null || attempt.result == null ? "" : attempt.result.strip();
+        if (result.isEmpty()) {
+            return new RaceEvaluation(false, false, 0.0, "empty_result");
+        }
+
+        Node node = graph.getNodes().get(attempt.id);
+        String executor = node == null ? "" : node.executorName().toLowerCase();
+        boolean retrieval = executor.contains("search") || executor.contains("rag")
+                || executor.contains("retriev");
+        if (!retrieval) {
+            return new RaceEvaluation(true, true, 1.0, "successful_result");
+        }
+
+        String lower = result.toLowerCase();
+        for (String marker : List.of("未找到", "没有找到", "暂无相关", "无相关内容",
+                "知识库为空", "no result", "not found", "无法搜索")) {
+            if (lower.contains(marker)) {
+                return new RaceEvaluation(false, false, 0.0, "explicit_no_result");
+            }
+        }
+
+        int chars = result.codePointCount(0, result.length());
+        double score = 0.35 + Math.min(0.45, chars / 600.0 * 0.45);
+        if (lower.contains("http://") || lower.contains("https://")) score += 0.10;
+        if (result.contains("\n-") || result.contains("\n1.") || result.contains("来源")) score += 0.10;
+        score = Math.min(1.0, score);
+        boolean qualified = chars >= cfg.raceMinResultChars;
+        return new RaceEvaluation(true, qualified, score,
+                qualified ? "qualified_result" : "best_effort_below_threshold");
+    }
+
+    private static boolean betterRaceCandidate(RaceAttempt candidate, RaceAttempt current,
+                                               Map<String, RaceEvaluation> evaluations) {
+        if (candidate == null) return false;
+        if (current == null) return true;
+        RaceEvaluation next = evaluations.get(candidate.id);
+        RaceEvaluation previous = evaluations.get(current.id);
+        if (next == null) return false;
+        if (previous == null) return true;
+        return next.score > previous.score;
     }
 
     // ─────────────── 单节点执行 ───────────────

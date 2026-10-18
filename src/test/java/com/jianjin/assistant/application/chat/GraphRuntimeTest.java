@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * GraphRuntime 行为冒烟测试：
  *  1) 拓扑层并行 + 依赖正确传递
- *  2) 同 race_group 节点 first-success-wins，落败者标 SKIPPED
+ *  2) 同 race_group 节点 first-qualified / bounded-best，落败者标 SKIPPED
  *  3) 中断信号能停止后续层
  */
 class GraphRuntimeTest {
@@ -41,7 +41,7 @@ class GraphRuntimeTest {
     }
 
     private static Tool sleepTool(String name, long ms, String result) {
-        return new Tool(name, "sleep " + ms,
+        Tool tool = new Tool(name, "sleep " + ms,
                 List.of(new ToolParam("q", "string", "q", false)),
                 params -> {
                     try { Thread.sleep(ms); } catch (InterruptedException e) {
@@ -50,6 +50,13 @@ class GraphRuntimeTest {
                     }
                     return result;
                 });
+        tool.setRaceSafe(true);
+        return tool;
+    }
+
+    private static Tool raceSafe(Tool tool) {
+        tool.setRaceSafe(true);
+        return tool;
     }
 
     @Test
@@ -104,6 +111,65 @@ class GraphRuntimeTest {
         // 慢节点要么没机会跑完被中断，要么直接 SKIPPED；总之不应是 DONE
         assertNotEquals(NodeStatus.DONE, tg.getNodes().get("n2").getStatus());
         assertEquals("fast-result", tg.getNodes().get("n1").getResult());
+    }
+
+    @Test
+    void fastestExplicitNoResultDoesNotWinRetrievalRace() {
+        AppConfig cfg = minimalCfg();
+        cfg.getGraph().setRaceGraceMs(30);
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("search_web", sleepTool("search_web", 10, "未找到相关内容"));
+        tools.put("rag_search", sleepTool("rag_search", 40,
+                "知识库证据：项目采用 DAG 调度，并支持依赖驱动的并行执行。"));
+        Node web = new Node("n1", NodeType.TOOL, "web", "search_web",
+                new HashMap<>(), List.of(), "search");
+        Node rag = new Node("n2", NodeType.TOOL, "rag", "rag_search",
+                new HashMap<>(), List.of(), "search");
+
+        new GraphRuntime(new TaskGraph(List.of(web, rag)), cfg, GraphRuntime.Config.from(cfg),
+                tools, new AtomicBoolean(false), e -> {}).execute();
+
+        assertEquals(NodeStatus.SKIPPED, web.getStatus());
+        assertEquals(NodeStatus.DONE, rag.getStatus());
+        assertTrue(rag.getResult().contains("DAG"));
+    }
+
+    @Test
+    void graceWindowCanPreferHigherQualityRetrievalResult() {
+        AppConfig cfg = minimalCfg();
+        cfg.getGraph().setRaceGraceMs(100);
+        cfg.getGraph().setRaceMinResultChars(5);
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("search_web", sleepTool("search_web", 10, "这是一个可用但较短的搜索答案。"));
+        tools.put("rag_search", sleepTool("rag_search", 40,
+                "来源：https://example.test/doc\n- 更完整的证据一\n- 更完整的证据二，并包含可追溯来源。"));
+        Node web = new Node("n1", NodeType.TOOL, "web", "search_web",
+                new HashMap<>(), List.of(), "search");
+        Node rag = new Node("n2", NodeType.TOOL, "rag", "rag_search",
+                new HashMap<>(), List.of(), "search");
+
+        new GraphRuntime(new TaskGraph(List.of(web, rag)), cfg, GraphRuntime.Config.from(cfg),
+                tools, new AtomicBoolean(false), e -> {}).execute();
+
+        assertEquals(NodeStatus.SKIPPED, web.getStatus());
+        assertEquals(NodeStatus.DONE, rag.getStatus());
+    }
+
+    @Test
+    void unsafeToolsWithRaceGroupDegradeToOrdinaryParallelExecution() {
+        Tool leftTool = new Tool("left", "", List.of(), params -> "left-result");
+        Tool rightTool = new Tool("right", "", List.of(), params -> "right-result");
+        Node left = new Node("n1", NodeType.TOOL, "left", "left",
+                new HashMap<>(), List.of(), "unsafe");
+        Node right = new Node("n2", NodeType.TOOL, "right", "right",
+                new HashMap<>(), List.of(), "unsafe");
+
+        new GraphRuntime(new TaskGraph(List.of(left, right)), minimalCfg(),
+                GraphRuntime.Config.from(minimalCfg()), Map.of("left", leftTool, "right", rightTool),
+                new AtomicBoolean(false), e -> {}).execute();
+
+        assertEquals(NodeStatus.DONE, left.getStatus());
+        assertEquals(NodeStatus.DONE, right.getStatus());
     }
 
     @Test
@@ -162,14 +228,14 @@ class GraphRuntimeTest {
         CyclicBarrier barrier = new CyclicBarrier(2);
         Map<String, Tool> tools = new HashMap<>();
         for (String name : List.of("left", "right")) {
-            tools.put(name, new Tool(name, "", List.of(), params -> {
+            tools.put(name, raceSafe(new Tool(name, "", List.of(), params -> {
                 try {
                     barrier.await(1, TimeUnit.SECONDS);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
                 return name + "-result";
-            }));
+            })));
         }
 
         Node left = new Node("n1", NodeType.TOOL, "left", "left",
@@ -193,13 +259,13 @@ class GraphRuntimeTest {
         cfg.getGraph().setRaceTimeoutMs(30);
         Map<String, Tool> tools = new HashMap<>();
         for (String name : List.of("slow-a", "slow-b")) {
-            tools.put(name, new Tool(name, "", List.of(), params -> {
+            tools.put(name, raceSafe(new Tool(name, "", List.of(), params -> {
                 long deadline = System.currentTimeMillis() + 500;
                 while (System.currentTimeMillis() < deadline) {
                     try { Thread.sleep(10); } catch (InterruptedException ignored) { /* deliberately stubborn */ }
                 }
                 return name + "-late";
-            }));
+            })));
         }
 
         Node a = new Node("n1", NodeType.TOOL, "slow-a", "slow-a",
@@ -382,7 +448,7 @@ class GraphRuntimeTest {
         CountDownLatch started = new CountDownLatch(2);
         Map<String, Tool> tools = new HashMap<>();
         for (String name : List.of("left", "right")) {
-            tools.put(name, new Tool(name, "", List.of(), params -> {
+            tools.put(name, raceSafe(new Tool(name, "", List.of(), params -> {
                 started.countDown();
                 try {
                     Thread.sleep(5000);
@@ -391,7 +457,7 @@ class GraphRuntimeTest {
                     throw new RuntimeException("interrupted");
                 }
                 return name;
-            }));
+            })));
         }
         Node left = new Node("n1", NodeType.TOOL, "left", "left",
                 new HashMap<>(), List.of(), "search");
