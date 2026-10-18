@@ -92,6 +92,7 @@ $env:AZURE_OPENAI_ENDPOINT = "https://your-resource.openai.azure.com" # 可选
 $env:AZURE_OPENAI_WEB_SEARCH_MODEL = "your-web-search-deployment" # 可选
 $env:GOOGLE_SEARCH_API_KEY = "your-google-api-key" # 可选
 $env:GOOGLE_SEARCH_ENGINE_ID = "your-programmable-search-engine-id" # 可选
+$env:SERPAPI_API_KEY = "your-serpapi-key" # 可选
 mvn spring-boot:run
 ```
 
@@ -106,6 +107,7 @@ export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com" # 可选
 export AZURE_OPENAI_WEB_SEARCH_MODEL="your-web-search-deployment" # 可选
 export GOOGLE_SEARCH_API_KEY="your-google-api-key" # 可选
 export GOOGLE_SEARCH_ENGINE_ID="your-programmable-search-engine-id" # 可选
+export SERPAPI_API_KEY="your-serpapi-key" # 可选
 mvn spring-boot:run
 ```
 
@@ -159,7 +161,7 @@ docker compose up -d --build
 | `app.rag.rerank.enabled` | `false` | 是否启用 LLM 精排 |
 | `app.memory.short-term-max-turns` | `10` | 短期记忆最大轮数 |
 | `app.harness.max-iterations` | `5` | ReAct 最大迭代数 |
-| `app.graph.max-parallel` | `4` | DAG 工具调用的最大并行度；默认可同时容纳三路公网搜索和一路 RAG |
+| `app.graph.max-parallel` | `5` | DAG 工具调用的最大并行度；默认可同时容纳四路公网搜索和一路 RAG |
 | `app.graph.race-timeout-ms` | `30000` | 竞速检索的整体超时时间 |
 | `app.graph.race-grace-ms` | `150` | 首个合格结果出现后的短暂择优窗口 |
 | `app.graph.race-min-result-chars` | `12` | 检索结果通过基础质量门控的最小字符数 |
@@ -360,10 +362,11 @@ Docker 镜像包含 Vue 前端和 Spring Boot 后端。前端单元测试运行 
 | `search_web` | 配置 Tavily 时执行真实搜索，否则回退到 LLM/Mock |
 | `bing_search` | 配置 Azure OpenAI Web Search 后注册，使用 Bing grounding 检索公网 |
 | `google_search` | 配置 Google Custom Search API Key 与搜索引擎 ID 后注册 |
+| `serpapi_search` | 配置 SerpAPI Key 后注册，通过其 Google Search 引擎检索公网 |
 | `rag_search` | 查询已导入的个人知识库 |
 | `exec_command` | 在配置的 Docker、Local 或 Mock 沙箱中执行经过校验的单条命令 |
 
-当至少配置两个真实公网搜索源时，Planner 会把 `search_web`、`bing_search`、`google_search` 放入同一个 `web_search` 竞速组：首个通过质量门控的结果触发短暂择优窗口，选定赢家后取消其余调用。`rag_search` 不与公网源互相淘汰；需要内外部资料时独立并行，最终统一聚合。Google Custom Search JSON API 当前只适合已有客户，Google 已停止接受新客户，并计划于 2027-01-01 停止该 API。
+当至少配置两个真实公网搜索源时，Planner 会把 `search_web`、`bing_search`、`google_search`、`serpapi_search` 放入同一个 `web_search` 竞速组：首个通过质量门控的结果触发短暂择优窗口，选定赢家后取消其余调用。`rag_search` 不与公网源互相淘汰；需要内外部资料时独立并行，最终统一聚合。Google Custom Search JSON API 当前只适合已有客户，Google 已停止接受新客户，并计划于 2027-01-01 停止该 API。
 
 `exec_command` 默认使用 Docker 后端，并限制超时、总输出大小、内存、CPU、PID、网络、只读根文件系统和全局并发数。Warn 级命令先返回一个与原命令、用户、工作区和会话绑定的短时单次令牌。该令牌不能由模型自行批准，必须先由用户调用确认接口：
 

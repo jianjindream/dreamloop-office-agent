@@ -17,6 +17,7 @@ import com.jianjin.assistant.dto.ChatResponse;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
 import com.jianjin.assistant.infrastructure.tool.BingSearchClient;
 import com.jianjin.assistant.infrastructure.tool.GoogleSearchClient;
+import com.jianjin.assistant.infrastructure.tool.SerpApiSearchClient;
 import com.jianjin.assistant.infrastructure.tool.TavilyClient;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentity;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentityHolder;
@@ -234,8 +235,25 @@ public class UnifiedAgentService {
                     }));
             tools.get("google_search").setRaceSafe(true);
         }
+
+        AppConfig.SerpApiSearchConfig serpApi = cfg.getSearch().getSerpApi();
+        if (serpApi != null && hasText(serpApi.getApiKey())) {
+            tools.put("serpapi_search", new Tool("serpapi_search", "使用 SerpAPI 搜索公开网络",
+                    List.of(new ToolParam("query", "string", "搜索关键词", true)),
+                    true,
+                    params -> {
+                        String q = params.get("query") == null ? "" : params.get("query").toString();
+                        try {
+                            return SerpApiSearchClient.search(q, serpApi.getApiKey(), serpApi.getApiUrl());
+                        } catch (Exception e) {
+                            throw new RuntimeException("SerpAPI Search 调用失败", e);
+                        }
+                    }));
+            tools.get("serpapi_search").setRaceSafe(true);
+        }
         // 有真实公网源时移除未配置 Tavily 的模型兜底，避免 LLM 常识回答混入检索竞速。
-        if (!tavilyConfigured && (tools.containsKey("bing_search") || tools.containsKey("google_search"))) {
+        if (!tavilyConfigured && (tools.containsKey("bing_search") || tools.containsKey("google_search")
+                || tools.containsKey("serpapi_search"))) {
             tools.remove("search_web");
         }
 

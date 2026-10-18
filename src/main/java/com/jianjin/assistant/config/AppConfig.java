@@ -315,6 +315,7 @@ public class AppConfig {
         private String apiUrl;
         private BingSearchConfig bing = new BingSearchConfig();
         private GoogleSearchConfig google = new GoogleSearchConfig();
+        private SerpApiSearchConfig serpApi = new SerpApiSearchConfig();
 
         public String getApiKey() { return apiKey; }
         public void setApiKey(String apiKey) { this.apiKey = apiKey; }
@@ -324,6 +325,8 @@ public class AppConfig {
         public void setBing(BingSearchConfig bing) { this.bing = bing; }
         public GoogleSearchConfig getGoogle() { return google; }
         public void setGoogle(GoogleSearchConfig google) { this.google = google; }
+        public SerpApiSearchConfig getSerpApi() { return serpApi; }
+        public void setSerpApi(SerpApiSearchConfig serpApi) { this.serpApi = serpApi; }
     }
 
     public static class BingSearchConfig {
@@ -348,6 +351,16 @@ public class AppConfig {
         public void setApiKey(String apiKey) { this.apiKey = apiKey; }
         public String getEngineId() { return engineId; }
         public void setEngineId(String engineId) { this.engineId = engineId; }
+        public String getApiUrl() { return apiUrl; }
+        public void setApiUrl(String apiUrl) { this.apiUrl = apiUrl; }
+    }
+
+    public static class SerpApiSearchConfig {
+        private String apiKey;
+        private String apiUrl = "https://serpapi.com/search.json";
+
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
         public String getApiUrl() { return apiUrl; }
         public void setApiUrl(String apiUrl) { this.apiUrl = apiUrl; }
     }
@@ -419,7 +432,7 @@ public class AppConfig {
     }
 
     public static class GraphConfig {
-        private int maxParallel = 4;
+        private int maxParallel = 5;
         private int raceTimeoutMs = 30000;
         /** 首个合格结果返回后，继续等待更优结果的短暂窗口。 */
         private int raceGraceMs = 150;

@@ -173,7 +173,7 @@ public class Planner {
                 - 工具参数需要引用上游结果时，使用 {{节点id.result}}，例如 {"text":"{{n1.result}}"}
                 - 只有只读、可安全取消且输出用途相同的检索工具才可设置相同 race_group
                 - race_group 使用 first-qualified 语义：最快返回但内容为空或无有效信息的结果不会获胜
-                - Tavily(search_web)、Bing(bing_search)、Google(google_search) 是同用途的公开网络搜索源，可设置相同 web_search race_group
+                - Tavily(search_web)、Bing(bing_search)、Google(google_search)、SerpAPI(serpapi_search) 是同用途的公开网络搜索源，可设置相同 web_search race_group
                 - rag_search 是内部/私有知识来源，不与公开网络搜索源竞速；需要内外部资料时让它独立并行，最终聚合
                 - 实时信息优先使用公开网络搜索工具，内部/私有知识优先使用 rag_search
                 - 无依赖关系的节点不要互相等待，depends_on 设为 []
@@ -370,7 +370,8 @@ public class Planner {
                 && (q.contains("搜索") || q.contains("查询") || q.contains("介绍")
                     || q.contains("是什么") || q.contains("怎么") || q.contains("如何"));
 
-        List<String> configuredPublicSources = List.of("search_web", "bing_search", "google_search").stream()
+        List<String> configuredPublicSources = List.of(
+                        "search_web", "bing_search", "google_search", "serpapi_search").stream()
                 .filter(ts::containsKey)
                 .filter(name -> ts.get(name).isRaceSafe())
                 .toList();
@@ -384,6 +385,7 @@ public class Planner {
                 String description = switch (source) {
                     case "bing_search" -> "使用 Bing 搜索公开网络";
                     case "google_search" -> "使用 Google 搜索公开网络";
+                    case "serpapi_search" -> "使用 SerpAPI 搜索公开网络";
                     default -> "使用 Tavily 搜索公开网络";
                 };
                 nodes.add(new Node(nextID.get(), NodeType.TOOL, description, source,
@@ -405,7 +407,7 @@ public class Planner {
         }
         // 其余 MCP / 自定义工具（无规则匹配的）按"独立并行 + query 兜底"加入
         java.util.Set<String> builtins = java.util.Set.of(
-                "get_time", "get_weather", "search_web", "bing_search", "google_search",
+                "get_time", "get_weather", "search_web", "bing_search", "google_search", "serpapi_search",
                 "rag_search", "exec_command");
         for (Map.Entry<String, Tool> e : ts.entrySet()) {
             if (builtins.contains(e.getKey())) continue;

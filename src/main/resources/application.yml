@@ -94,8 +94,8 @@ app:
     step-timeout-ms: 5000
     max-iterations: 5
   graph:
-    # 至少覆盖当前 Tavily/Bing/Google 三路竞速，并为独立 RAG 节点保留并发槽位。
-    max-parallel: 4
+    # 覆盖 Tavily/Bing/Google/SerpAPI 四路竞速，并为独立 RAG 节点保留并发槽位。
+    max-parallel: 5
     race-timeout-ms: 30000
     # 首个合格检索结果出现后，短暂等待可能质量更高的候选。
     race-grace-ms: 150
@@ -114,6 +114,9 @@ app:
       api-key: "${GOOGLE_SEARCH_API_KEY:}"
       engine-id: "${GOOGLE_SEARCH_ENGINE_ID:}"
       api-url: "https://www.googleapis.com/customsearch/v1"
+    serp-api:
+      api-key: "${SERPAPI_API_KEY:}"
+      api-url: "https://serpapi.com/search.json"
 
   # ===== 知识图谱（Neo4j，可选）=====
   neo4j:

@@ -18,10 +18,12 @@ class PlannerSubAgentRuleTest {
         Tool tavily = raceSafeTool("search_web", "web");
         Tool bing = raceSafeTool("bing_search", "bing");
         Tool google = raceSafeTool("google_search", "google");
+        Tool serpApi = raceSafeTool("serpapi_search", "serpapi");
         return Map.of(
                 "search_web", tavily,
                 "bing_search", bing,
                 "google_search", google,
+                "serpapi_search", serpApi,
                 "rag_search", new Tool("rag_search", "", List.of(), params -> "rag"));
     }
 
@@ -60,8 +62,8 @@ class PlannerSubAgentRuleTest {
         Planner planner = new Planner(new AppConfig(), null, null);
         List<Node> nodes = planner.planGraph("查询 Java 是什么", retrievalTools(), "");
 
-        assertEquals(4, nodes.size());
-        assertEquals(3, nodes.stream().filter(n -> "web_search".equals(n.getRaceGroup())).count());
+        assertEquals(5, nodes.size());
+        assertEquals(4, nodes.stream().filter(n -> "web_search".equals(n.getRaceGroup())).count());
         Node rag = nodes.stream().filter(n -> "rag_search".equals(n.getToolName())).findFirst().orElseThrow();
         assertEquals("", rag.getRaceGroup());
     }
@@ -81,7 +83,7 @@ class PlannerSubAgentRuleTest {
         Planner planner = new Planner(new AppConfig(), null, null);
         List<Node> nodes = planner.planGraph("查询最新 Java 版本", retrievalTools(), "");
 
-        assertEquals(3, nodes.size());
+        assertEquals(4, nodes.size());
         assertTrue(nodes.stream().allMatch(n -> "web_search".equals(n.getRaceGroup())));
         assertTrue(nodes.stream().noneMatch(n -> "rag_search".equals(n.getToolName())));
     }
@@ -91,8 +93,8 @@ class PlannerSubAgentRuleTest {
         Planner planner = new Planner(new AppConfig(), null, null);
         List<Node> nodes = planner.planGraph("结合知识库和网络搜索查询报销规定", retrievalTools(), "");
 
-        assertEquals(4, nodes.size());
-        assertEquals(3, nodes.stream().filter(n -> "web_search".equals(n.getRaceGroup())).count());
+        assertEquals(5, nodes.size());
+        assertEquals(4, nodes.stream().filter(n -> "web_search".equals(n.getRaceGroup())).count());
         Node rag = nodes.stream().filter(n -> "rag_search".equals(n.getToolName())).findFirst().orElseThrow();
         assertEquals("", rag.getRaceGroup());
     }
