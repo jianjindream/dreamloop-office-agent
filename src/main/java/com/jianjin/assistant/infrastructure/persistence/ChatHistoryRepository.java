@@ -1,32 +1,16 @@
 package com.jianjin.assistant.infrastructure.persistence;
 
-import com.jianjin.assistant.infrastructure.platform.PostgresConnector;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
 
 import java.sql.*;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.*;
 
 @Repository
 public class ChatHistoryRepository {
-
-    private static final Logger log = LoggerFactory.getLogger(ChatHistoryRepository.class);
-
-    private final PostgresConnector pg;
-    private final AtomicLong memoryIds = new AtomicLong();
-    private final Map<String, List<Row>> memoryHistory = new LinkedHashMap<>();
-    private final Map<String, SessionRow> memorySessions = new LinkedHashMap<>();
-
-    public ChatHistoryRepository(PostgresConnector pg) {
-        this.pg = pg;
-    }
+    private final WorkspaceDatabase database;
+    public ChatHistoryRepository(WorkspaceDatabase database) { this.database = database; }
 
     public static class Row {
         public long id;
@@ -34,7 +18,6 @@ public class ChatHistoryRepository {
         public String content;
         public String createdAt;
     }
-
     public static class SessionRow {
         public String sessionId;
         public String title;
@@ -42,152 +25,153 @@ public class ChatHistoryRepository {
         public String updatedAt;
         public int messageCount;
     }
+    public record ImportedMessage(String role, String content, long createdAt) {}
 
-    public synchronized long save(String userId, String sessionId, String role, String content) {
-        Connection c = pg.connection();
-        if (c == null) return saveMemory(userId, sessionId, role, content);
-        try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO chat_history (user_id, session_id, role, content) VALUES (?, ?, ?, ?) RETURNING id")) {
-            upsertSession(c, userId, sessionId, role, content);
-            ps.setString(1, userId); ps.setString(2, sessionId); ps.setString(3, role); ps.setString(4, content);
-            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getLong(1) : 0; }
-        } catch (SQLException e) {
-            log.warn("聊天记录保存失败: {}", e.getMessage());
-        }
-        return 0;
-    }
-
-    public synchronized List<Row> load(String userId, String sessionId, long afterId, int limit) {
-        List<Row> rows = new ArrayList<>();
-        Connection c = pg.connection();
-        if (c == null) return loadMemory(userId, sessionId, afterId, limit);
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT id, role, content, created_at::text FROM chat_history " +
-                        "WHERE user_id = ? AND session_id = ? AND id > ? ORDER BY id DESC LIMIT ?")) {
-            ps.setString(1, userId); ps.setString(2, sessionId); ps.setLong(3, afterId); ps.setInt(4, limit);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    Row r = new Row();
-                r.id = rs.getLong(1); r.role = rs.getString(2);
-                r.content = rs.getString(3); r.createdAt = rs.getString(4);
-                    rows.add(r);
-                }
+    public long save(String owner, String session, String role, String content) {
+        validateMessage(role,content);
+        return retryInsert(() -> database.transaction(c -> {
+            ensureSession(c,owner,session,"user".equals(role) ? deriveTitle(content) : "新对话",Instant.now());
+            try (PreparedStatement ps=c.prepareStatement("INSERT INTO chat_history(user_id,session_id,role,content) VALUES(?,?,?,?)",Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1,owner); ps.setString(2,session); ps.setString(3,role); ps.setString(4,content); ps.executeUpdate();
+                try(ResultSet rs=ps.getGeneratedKeys()) { if(rs.next()) return rs.getLong(1); }
+                throw new SQLException("未返回消息 ID");
             }
-        } catch (SQLException e) {
-            log.warn("加载聊天记录失败: {}", e.getMessage());
-        }
-        Collections.reverse(rows);
-        return rows;
+        }));
     }
 
-    public synchronized void deleteThrough(String userId, String sessionId, long throughId) {
-        if (throughId <= 0) return;
-        Connection c = pg.connection();
-        if (c == null) {
-            List<Row> rows = memoryHistory.get(scope(userId, sessionId));
-            if (rows != null) rows.removeIf(row -> row.id <= throughId);
-            return;
-        }
-        try (PreparedStatement ps = c.prepareStatement(
-                "DELETE FROM chat_history WHERE user_id = ? AND session_id = ? AND id <= ?")) {
-            ps.setString(1, userId); ps.setString(2, sessionId); ps.setLong(3, throughId); ps.executeUpdate();
-        } catch (SQLException e) { log.warn("聊天历史清理失败: {}", e.getMessage()); }
+    /** Recent bounded context for model memory; product history uses page() instead. */
+    public List<Row> load(String owner,String session,long afterId,int limit) {
+        List<Row> result=query(owner,session,afterId,limit,false);
+        Collections.reverse(result);
+        return result;
     }
-
-    public synchronized List<SessionRow> listSessions(String userId) {
-        Connection c = pg.connection();
-        if (c == null) {
-            List<SessionRow> out = new ArrayList<>();
-            String prefix = userId + "\u0000";
-            for (Map.Entry<String, SessionRow> entry : memorySessions.entrySet()) {
-                if (entry.getKey().startsWith(prefix)) out.add(copy(entry.getValue()));
+    /** Forward pagination returns earliest unseen messages without dropping old history. */
+    public List<Row> page(String owner,String session,long afterId,int limit) { return query(owner,session,afterId,limit,true); }
+    private List<Row> query(String owner,String session,long afterId,int limit,boolean forward) {
+        return database.transaction(c -> {
+            List<Row> result=new ArrayList<>();
+            try(PreparedStatement ps=c.prepareStatement("SELECT id,role,content,created_at FROM chat_history WHERE user_id=? AND session_id=? AND id>? ORDER BY id " + (forward ? "ASC" : "DESC") + " LIMIT ?")) {
+                ps.setString(1,owner); ps.setString(2,session); ps.setLong(3,Math.max(0,afterId)); ps.setInt(4,Math.max(1,Math.min(10000,limit)));
+                try(ResultSet rs=ps.executeQuery()) { while(rs.next()) {
+                    Row row=new Row(); row.id=rs.getLong(1); row.role=rs.getString(2); row.content=rs.getString(3);
+                    row.createdAt=rs.getTimestamp(4).toInstant().toString(); result.add(row);
+                }}
             }
-            out.sort((a, b) -> b.updatedAt.compareTo(a.updatedAt));
-            return out;
-        }
-        List<SessionRow> out = new ArrayList<>();
-        String sql = "SELECT s.session_id,s.title,s.created_at::text,s.updated_at::text," +
-                "COUNT(h.id) FROM chat_sessions s LEFT JOIN chat_history h ON h.user_id=s.user_id " +
-                "AND h.session_id=s.session_id WHERE s.user_id=? GROUP BY s.session_id,s.title,s.created_at,s.updated_at " +
-                "ORDER BY s.updated_at DESC";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, userId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    SessionRow row = new SessionRow();
-                    row.sessionId=rs.getString(1); row.title=rs.getString(2); row.createdAt=rs.getString(3);
-                    row.updatedAt=rs.getString(4); row.messageCount=rs.getInt(5); out.add(row);
-                }
-            }
-        } catch (SQLException e) { log.warn("会话列表加载失败: {}", e.getMessage()); }
-        return out;
-    }
-
-    public synchronized boolean renameSession(String userId, String sessionId, String title) {
-        if (title == null || title.isBlank()) throw new IllegalArgumentException("title is required");
-        Connection c = pg.connection();
-        if (c == null) {
-            SessionRow row = memorySessions.get(scope(userId, sessionId));
-            if (row == null) return false;
-            row.title = title.trim(); row.updatedAt = Instant.now().toString(); return true;
-        }
-        try (PreparedStatement ps = c.prepareStatement("UPDATE chat_sessions SET title=?,updated_at=NOW() WHERE user_id=? AND session_id=?")) {
-            ps.setString(1,title.trim()); ps.setString(2,userId); ps.setString(3,sessionId); return ps.executeUpdate()>0;
-        } catch (SQLException e) { throw new IllegalStateException("会话重命名失败", e); }
-    }
-
-    public synchronized boolean deleteSession(String userId, String sessionId) {
-        Connection c = pg.connection();
-        if (c == null) {
-            boolean found = memorySessions.remove(scope(userId, sessionId)) != null;
-            memoryHistory.remove(scope(userId, sessionId)); return found;
-        }
-        try {
-            c.setAutoCommit(false);
-            try (PreparedStatement h = c.prepareStatement("DELETE FROM chat_history WHERE user_id=? AND session_id=?");
-                 PreparedStatement s = c.prepareStatement("DELETE FROM chat_sessions WHERE user_id=? AND session_id=?")) {
-                h.setString(1,userId); h.setString(2,sessionId); h.executeUpdate();
-                s.setString(1,userId); s.setString(2,sessionId); boolean found=s.executeUpdate()>0;
-                c.commit(); return found;
-            } catch (SQLException e) { c.rollback(); throw e; }
-            finally { c.setAutoCommit(true); }
-        } catch (SQLException e) { throw new IllegalStateException("会话删除失败", e); }
-    }
-
-    private long saveMemory(String userId, String sessionId, String role, String content) {
-        String key = scope(userId, sessionId); Instant now = Instant.now();
-        Row row = new Row(); row.id=memoryIds.incrementAndGet(); row.role=role; row.content=content; row.createdAt=now.toString();
-        memoryHistory.computeIfAbsent(key, ignored -> new ArrayList<>()).add(row);
-        SessionRow session = memorySessions.computeIfAbsent(key, ignored -> {
-            SessionRow created = new SessionRow(); created.sessionId=sessionId; created.title="新对话";
-            created.createdAt=now.toString(); return created;
+            return result;
         });
-        if ("user".equals(role) && "新对话".equals(session.title)) session.title=deriveTitle(content);
-        session.updatedAt=now.toString(); session.messageCount=memoryHistory.get(key).size();
-        return row.id;
     }
-
-    private List<Row> loadMemory(String userId, String sessionId, long afterId, int limit) {
-        List<Row> source = memoryHistory.getOrDefault(scope(userId, sessionId), List.of());
-        List<Row> out = new ArrayList<>();
-        int start = Math.max(0, source.size() - Math.max(1, limit));
-        for (int i=start;i<source.size();i++) if (source.get(i).id>afterId) out.add(copy(source.get(i)));
-        return out;
+    public void deleteThrough(String owner,String session,long throughId) {
+        if(throughId<=0) return;
+        database.transaction(c -> {
+            try(PreparedStatement ps=c.prepareStatement("DELETE FROM chat_history WHERE user_id=? AND session_id=? AND id<=?")) {
+                ps.setString(1,owner); ps.setString(2,session); ps.setLong(3,throughId); ps.executeUpdate();
+            }
+            return null;
+        });
     }
-
-    private void upsertSession(Connection c, String userId, String sessionId, String role, String content) throws SQLException {
-        String title = "user".equals(role) ? deriveTitle(content) : "新对话";
-        try (PreparedStatement ps = c.prepareStatement("INSERT INTO chat_sessions(user_id,session_id,title) VALUES(?,?,?) " +
-                "ON CONFLICT(user_id,session_id) DO UPDATE SET updated_at=NOW(), title=CASE WHEN chat_sessions.title='新对话' AND EXCLUDED.title<>'新对话' THEN EXCLUDED.title ELSE chat_sessions.title END")) {
-            ps.setString(1,userId); ps.setString(2,sessionId); ps.setString(3,title); ps.executeUpdate();
+    public List<SessionRow> listSessions(String owner) { return listSessions(owner,""); }
+    public List<SessionRow> listSessions(String owner,String query) {
+        return database.transaction(c -> {
+            List<SessionRow> result=new ArrayList<>();
+            String filter=query==null ? "" : query.trim().toLowerCase(Locale.ROOT);
+            String sql="SELECT s.session_id,s.title,s.created_at,s.updated_at,(SELECT COUNT(*) FROM chat_history h WHERE h.user_id=s.user_id AND h.session_id=s.session_id) AS message_count FROM chat_sessions s WHERE s.user_id=?";
+            if(!filter.isBlank()) sql+=" AND (LOWER(s.title) LIKE ? ESCAPE '!' OR EXISTS(SELECT 1 FROM chat_history h WHERE h.user_id=s.user_id AND h.session_id=s.session_id AND LOWER(h.content) LIKE ? ESCAPE '!'))";
+            sql+=" ORDER BY s.updated_at DESC,s.session_id";
+            try(PreparedStatement ps=c.prepareStatement(sql)) {
+                ps.setString(1,owner);
+                if(!filter.isBlank()) {
+                    String pattern="%"+filter.replace("!","!!").replace("%","!%").replace("_","!_")+"%";
+                    ps.setString(2,pattern); ps.setString(3,pattern);
+                }
+                try(ResultSet rs=ps.executeQuery()) { while(rs.next()) {
+                    SessionRow row=new SessionRow(); row.sessionId=rs.getString(1); row.title=rs.getString(2);
+                    row.createdAt=rs.getTimestamp(3).toInstant().toString(); row.updatedAt=rs.getTimestamp(4).toInstant().toString();
+                    row.messageCount=rs.getInt(5); result.add(row);
+                }}
+            }
+            return result;
+        });
+    }
+    public boolean renameSession(String owner,String session,String title) {
+        if(title==null || title.isBlank() || title.length()>200) throw new IllegalArgumentException("会话标题须为 1—200 字");
+        return database.transaction(c -> {
+            try(PreparedStatement ps=c.prepareStatement("UPDATE chat_sessions SET title=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND session_id=?")) {
+                ps.setString(1,title.trim()); ps.setString(2,owner); ps.setString(3,session); return ps.executeUpdate()>0;
+            }
+        });
+    }
+    public boolean deleteSession(String owner,String session) {
+        return database.transaction(c -> {
+            try(PreparedStatement ps=c.prepareStatement("SELECT session_id FROM chat_sessions WHERE user_id=? AND session_id=? FOR UPDATE")) {
+                ps.setString(1,owner); ps.setString(2,session); try(ResultSet rs=ps.executeQuery()) { if(!rs.next()) return false; }
+            }
+            try(PreparedStatement history=c.prepareStatement("DELETE FROM chat_history WHERE user_id=? AND session_id=?");
+                PreparedStatement sessions=c.prepareStatement("DELETE FROM chat_sessions WHERE user_id=? AND session_id=?")) {
+                history.setString(1,owner); history.setString(2,session); history.executeUpdate();
+                sessions.setString(1,owner); sessions.setString(2,session); return sessions.executeUpdate()>0;
+            }
+        });
+    }
+    /** Existing server sessions win. Import is atomic and retrying never duplicates messages. */
+    public boolean importSession(String owner,String session,String title,long createdAt,List<ImportedMessage> messages) {
+        if(session==null || !session.matches("[A-Za-z0-9._-]{1,120}")) throw new IllegalArgumentException("会话 ID 不合法");
+        if(messages==null || messages.isEmpty() || messages.size()>10000) throw new IllegalArgumentException("每个迁移会话须包含 1—10000 条消息");
+        for(ImportedMessage message:messages) validateMessage(message.role(),message.content());
+        return retryInsert(() -> database.transaction(c -> {
+            try(PreparedStatement ps=c.prepareStatement("SELECT session_id FROM chat_sessions WHERE user_id=? AND session_id=?")) {
+                ps.setString(1,owner); ps.setString(2,session); try(ResultSet rs=ps.executeQuery()) { if(rs.next()) return false; }
+            }
+            Instant created=createdAt>0 ? Instant.ofEpochMilli(createdAt) : Instant.now();
+            ensureSession(c,owner,session,title==null || title.isBlank() ? deriveTitle(messages.get(0).content()) : title.substring(0,Math.min(200,title.length())),created);
+            Instant updated=created;
+            try(PreparedStatement ps=c.prepareStatement("INSERT INTO chat_history(user_id,session_id,role,content,created_at) VALUES(?,?,?,?,?)")) {
+                for(ImportedMessage message:messages) {
+                    Instant time=message.createdAt()>0 ? Instant.ofEpochMilli(message.createdAt()) : created;
+                    if(time.isAfter(updated)) updated=time;
+                    ps.setString(1,owner); ps.setString(2,session); ps.setString(3,message.role()); ps.setString(4,message.content());
+                    ps.setObject(5,time.atOffset(ZoneOffset.UTC)); ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            try(PreparedStatement ps=c.prepareStatement("UPDATE chat_sessions SET updated_at=? WHERE user_id=? AND session_id=?")) {
+                ps.setObject(1,updated.atOffset(ZoneOffset.UTC)); ps.setString(2,owner); ps.setString(3,session); ps.executeUpdate();
+            }
+            return true;
+        }));
+    }
+    private void ensureSession(Connection c,String owner,String session,String title,Instant created) throws SQLException {
+        try(PreparedStatement ps=c.prepareStatement("SELECT title FROM chat_sessions WHERE user_id=? AND session_id=? FOR UPDATE")) {
+            ps.setString(1,owner); ps.setString(2,session);
+            try(ResultSet rs=ps.executeQuery()) {
+                if(rs.next()) {
+                    String next="新对话".equals(rs.getString(1)) ? title : rs.getString(1);
+                    try(PreparedStatement update=c.prepareStatement("UPDATE chat_sessions SET title=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND session_id=?")) {
+                        update.setString(1,next); update.setString(2,owner); update.setString(3,session); update.executeUpdate();
+                    }
+                    return;
+                }
+            }
+        }
+        try(PreparedStatement ps=c.prepareStatement("INSERT INTO chat_sessions(user_id,session_id,title,created_at,updated_at) VALUES(?,?,?,?,?)")) {
+            ps.setString(1,owner); ps.setString(2,session); ps.setString(3,title);
+            ps.setObject(4,created.atOffset(ZoneOffset.UTC)); ps.setObject(5,created.atOffset(ZoneOffset.UTC)); ps.executeUpdate();
         }
     }
-
-    private static String deriveTitle(String content) {
-        String value = content == null ? "新对话" : content.replaceAll("\\s+", " ").trim();
-        return value.isEmpty() ? "新对话" : value.substring(0, Math.min(40, value.length()));
+    private static void validateMessage(String role,String content) {
+        if(!"user".equals(role) && !"assistant".equals(role)) throw new IllegalArgumentException("不支持的消息角色");
+        if(content==null || content.length()>1_000_000) throw new IllegalArgumentException("消息内容过长或为空");
     }
-    private static String scope(String userId,String sessionId){return userId+"\u0000"+sessionId;}
-    private static Row copy(Row in){Row r=new Row();r.id=in.id;r.role=in.role;r.content=in.content;r.createdAt=in.createdAt;return r;}
-    private static SessionRow copy(SessionRow in){SessionRow r=new SessionRow();r.sessionId=in.sessionId;r.title=in.title;r.createdAt=in.createdAt;r.updatedAt=in.updatedAt;r.messageCount=in.messageCount;return r;}
+    private static String deriveTitle(String content) {
+        String value=content.replaceAll("\\s+"," ").trim();
+        return value.isBlank() ? "新对话" : value.substring(0,Math.min(40,value.length()));
+    }
+    private <T> T retryInsert(java.util.function.Supplier<T> operation) {
+        try { return operation.get(); }
+        catch(IllegalStateException e) {
+            for(Throwable cause=e;cause!=null;cause=cause.getCause()) {
+                if(cause instanceof SQLException sql && "23505".equals(sql.getSQLState())) return operation.get();
+            }
+            throw e;
+        }
+    }
 }

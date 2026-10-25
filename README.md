@@ -8,6 +8,7 @@ Dreamloop 是一个基于 Java 21 与 Spring Boot 3 的办公智能体项目。�
 - **流式执行**：通过 SSE 逐步返回规划、工具调用、观察结果和最终答案，并支持取消任务。
 - **混合 RAG**：组合 Milvus 向量检索、Elasticsearch 关键词检索和 Neo4j 图检索，使用加权 RRF 融合；支持 Query Rewrite、小块召回/大块生成和可选 LLM Rerank。
 - **文档知识库**：支持直接写入文本，以及上传 PDF、TXT、Markdown 文件；文档可同步进入 RAG 索引。
+- **可靠的工作成果存储**：文档、历史版本及会话默认保存在本地 H2 文件数据库；可显式切换 PostgreSQL。原始附件单独保存，支持自动保存草稿、版本冲突检测和回收站恢复。
 - **分层记忆**：按 `user_id` 与 `session_id` 隔离短期记忆、长期记忆、用户偏好和会话摘要。
 - **工具系统**：内置时间、模拟天气、Web 搜索、知识库检索和沙箱命令工具，并可在运行时注册 HTTP MCP 工具。
 - **可靠执行**：包含执行计划、步骤重试、超时、快照和中断机制。
@@ -46,7 +47,7 @@ flowchart LR
 | 后端 | Java 21、Spring Boot 3.2、Maven |
 | 前端 | Vue 3、TypeScript、Vite、Pinia |
 | 模型接口 | 阿里云百炼 OpenAI 兼容的 Chat Completions 与 Embeddings API |
-| 数据持久化 | PostgreSQL 16 |
+| 数据持久化 | H2 文件数据库（默认工作成果存储）、PostgreSQL 16（可选） |
 | 检索 | Milvus 余弦语义检索、Elasticsearch、Neo4j、加权 RRF |
 | 事件 | Kafka（KRaft） |
 | 文档解析 | Apache PDFBox |
@@ -332,6 +333,10 @@ src/main/resources/
 
 产品化接口（服务端会话、任务级取消、SSE 契约、文档删除、上传进度、MCP 管理、认证与错误码）见 [后端接口说明](docs/backend-api.md)。
 
+工作成果存储、备份、部署和旧记录迁移见 [存储说明](docs/workspace-storage.md)。默认数据位于 `data/workspace/`，即使未启动 PostgreSQL，文档和会话也会在重启后保留。指定 PostgreSQL 后不会在连接失败时自动改用其他数据库。
+
+产品首版流程、范围和三组虚构周报验收资料见 [周报产品基线](docs/product/weekly-report-v1.md)。第一批实现可靠保存与服务端会话；完整周报任务和导出属于后续批次。
+
 运行全部测试：
 
 ```bash
@@ -386,7 +391,7 @@ Content-Type: application/json
 ## 生产使用前须知
 
 - 默认数据库密码、Neo4j 密码和 Elasticsearch 配置仅用于本地开发，部署前必须修改。
-- Controller 当前允许跨域来源 `*`，且 API 没有内置认证与租户鉴权，不应直接暴露到公网。
+- 默认开发模式不强制登录；生产环境启用 `APP_AUTH_ENABLED=true`，通过外部配置注入 Bearer token 与允许的跨域来源。已有用户/工作区隔离，团队角色与文档共享权限仍需后续完善。
 - Docker Compose 会启动多个资源密集型组件；资源有限时可只启动实际需要的服务。
 - 动态 MCP 工具会向配置的 HTTP Endpoint 发起请求，应限制可注册地址并增加认证、审计和网络策略。
 - Local 后端不是安全隔离边界，仅用于显式开启的可信开发环境；生产环境应使用独立 Docker/容器执行节点。

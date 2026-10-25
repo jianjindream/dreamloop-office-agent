@@ -19,8 +19,15 @@ public interface LibraryRepo {
     /** 按版本号降序列出文档的历史版本。 */
     List<DocumentVersion> listVersions(String documentId);
 
-    /** Permanently remove a document and all of its versions. */
+    /** Move a document to trash, retaining all versions and attachments. */
     boolean delete(String documentId);
+
+    List<Document> listDeleted();
+
+    boolean restore(String documentId);
+
+    /** Update the exact version that was indexed, even if another save has already appended a version. */
+    void putVersionMetadata(String versionId, String key, Object value);
 
     /** Attach server-owned metadata to the latest immutable content version. */
     void putLatestMetadata(String documentId, String key, Object value);

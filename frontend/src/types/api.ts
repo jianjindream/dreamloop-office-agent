@@ -48,13 +48,21 @@ export interface DocumentWritePayload {
   doc_type?: string
   metadata?: Record<string, unknown>
   ingest_to_rag?: boolean
+  draft?: boolean
+  base_version?: number
 }
 
 export interface DocumentWriteResult extends DocumentDetail {
   created: boolean
+  document_saved?: boolean
+  index_status?: string
+  index_error?: string
 }
 
 export interface UploadResult {
+  document_saved?: boolean
+  index_status?: string
+  index_error?: string
   upload_id?: string
   filename?: string
   content_type?: string

@@ -279,6 +279,14 @@ public class InfrastructureService {
         return chatHistoryRepo.listSessions(userId);
     }
 
+    public List<ChatHistoryRepository.SessionRow> searchChatSessions(String userId, String query) {
+        return chatHistoryRepo.listSessions(userId, query);
+    }
+
+    public List<ChatHistoryRepository.Row> pageChatMessages(String userId, String sessionId, long afterId, int limit) {
+        return chatHistoryRepo.page(userId, sessionId, afterId, limit);
+    }
+
     public boolean renameChatSession(String userId, String sessionId, String title) {
         return chatHistoryRepo.renameSession(userId, sessionId, title);
     }

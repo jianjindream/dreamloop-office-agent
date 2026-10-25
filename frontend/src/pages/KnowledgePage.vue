@@ -99,7 +99,7 @@ const acceptFiles = async (files: FileList | File[]) => {
         if (progress === 100) item.state = 'processing'
       })
       item.state = 'done'
-      item.message = result.needs_ocr ? '文件需要 OCR 处理' : `已生成 ${result.chunk_count ?? 0} 个知识片段`
+      item.message = result.index_error || (result.needs_ocr ? '文件需要 OCR 处理' : `文档已保存，已生成 ${result.chunk_count ?? 0} 个知识片段`)
       rememberUpload(result, file)
       await loadDocuments(true)
     } catch (error) {

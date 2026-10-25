@@ -4,12 +4,16 @@
 
 ## 会话与消息
 
-- `GET /sessions`：当前用户在当前工作区中的会话列表。
+- `GET /sessions?q=关键词`：当前用户在当前工作区中的会话列表；可按标题或消息正文搜索，特殊字符按字面匹配。
 - `GET /sessions/{sessionId}/messages?after_id=0&limit=200`：完整消息历史，最多 500 条。
 - `PATCH /sessions/{sessionId}`：请求体 `{ "title": "新标题" }`。
 - `DELETE /sessions/{sessionId}`：删除会话与消息。
 
-PostgreSQL 可用时使用 `chat_sessions` 与 `chat_history`；不可用时自动退化到进程内存。对话摘要只影响模型上下文，不再删除产品消息历史。
+会话使用工作成果数据库，默认是 `data/workspace/workspace.mv.db`，显式配置 `APP_STORAGE_BACKEND=postgres` 时使用 PostgreSQL。数据库错误会明确失败，不会退化到内存。对话摘要只影响模型上下文，不删除产品消息历史。
+
+消息接口按 ID 正序返回最早未读取的消息。使用最后一条 ID 作为下一页 `after_id`，直到返回数量小于 `limit`；每页最多 500 条。模型上下文仍独立读取最近消息。
+
+- `POST /sessions/import`：幂等迁移旧浏览器会话。请求为 `{ "id":"session-...", "title":"旧周报", "createdAt":1792742400000, "messages":[{"role":"user","content":"原始消息","createdAt":1792742400000}] }`。身份始终来自请求认证；服务端已有同 ID 会话时保持服务端记录，不重复追加。每个会话最多 10000 条，非法输入整体拒绝。
 
 ## 生成任务与 SSE
 
@@ -29,11 +33,19 @@ PostgreSQL 可用时使用 `chat_sessions` 与 `chat_history`；不可用时自�
 ## 文档与上传
 
 - `POST /documents`、`PUT /documents/{id}`：创建或更新文档；更新标题即重命名。
-- `DELETE /documents/{id}`：按 ID 删除文档及全部版本。
+- `DELETE /documents/{id}`：移入回收站，保留版本和原始附件，同时移除该文档已知的知识库索引；移除索引失败会明确报错。
+- `GET /documents?status=deleted`：当前用户的回收站。
+- `POST /documents/{id}/restore`：恢复文档，保留全部版本和附件；需要检索时重新建立索引。
+- `POST /documents/{id}/reindex`：对最新版本重建索引，不创建新正文版本。
+- `GET /documents/{id}/original`：下载已授权文档的原始上传字节；AI 创建的文档返回 `ATTACHMENT_NOT_FOUND`。
 - `POST /upload/file`：可附带 `upload_id`。
 - `GET /uploads/{uploadId}/progress`：返回 `received`、`reading`、`parsing`、`indexing`、`completed` 或 `failed` 阶段及百分比。
 
 文档列表、详情、更新、版本和删除均按当前工作区用户校验。
+
+创建和更新支持 `draft: true` 标记自动保存草稿。更新支持 `base_version`，事务中发现版本不一致返回 `409 / DOCUMENT_VERSION_CONFLICT`，客户端保留草稿。
+
+上传及保存返回 `document_saved: true` 和 `index_status`（`not_indexed`、`indexed`、`failed`）。索引失败仍保留正文并返回 `index_error`；不能只依据“上传进度 100%”判断检索已可用。索引状态记录在具体版本元数据中。
 
 ## MCP 工具
 

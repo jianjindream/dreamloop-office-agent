@@ -8,6 +8,10 @@ spring:
       - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
 
 app:
+  # 工作成果默认写入文件数据库；postgres 模式连接失败会报错，不会降级为内存。
+  storage:
+    backend: "${APP_STORAGE_BACKEND:h2}"
+    directory: "${APP_STORAGE_DIRECTORY:data/workspace}"
   llm:
     # 阿里云百炼 OpenAI 兼容接口（华北 2/北京）。
     # Token Plan 或其他地域的 Key 必须改用百炼控制台显示的配套 API Host。

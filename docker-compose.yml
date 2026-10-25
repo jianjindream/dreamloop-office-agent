@@ -24,6 +24,8 @@ services:
       - APP_POSTGRES_USER=aiagent
       - APP_POSTGRES_PASSWORD=aiagent123
       - APP_POSTGRES_DATABASE=aiagent
+      - APP_STORAGE_BACKEND=postgres
+      - APP_STORAGE_DIRECTORY=/app/data/workspace
       - APP_ELASTICSEARCH_ADDRESSES=http://elasticsearch:9200
       - APP_ELASTICSEARCH_USERNAME=elastic
       - APP_ELASTICSEARCH_PASSWORD=changeme
@@ -32,6 +34,8 @@ services:
       - APP_NEO4J_URI=bolt://neo4j:7687
       - APP_NEO4J_USER=neo4j
       - APP_NEO4J_PASSWORD=password123
+    volumes:
+      - workspace_data:/app/data/workspace
     depends_on:
       milvus:
         condition: service_healthy
@@ -194,6 +198,7 @@ services:
       start_period: 30s
 
 volumes:
+  workspace_data:
   etcd_data:
   minio_data:
   milvus_data:

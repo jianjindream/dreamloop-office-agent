@@ -21,6 +21,7 @@ describe('document canvas', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    localStorage.clear()
   })
 
   it('does not mark a blank draft dirty', () => {
@@ -58,5 +59,36 @@ describe('document canvas', () => {
     expect(await store.save()).toBe(false)
     expect(store.content).toBe('重要正文')
     expect(store.error).toBe('服务不可用')
+  })
+
+  it('preserves typing that happens while a save is in flight', async () => {
+    let resolve!: (result: ReturnType<typeof savedResult>) => void
+    vi.mocked(agentApi.createDocument).mockImplementation(() => new Promise((done) => { resolve = done }))
+    const store = useDocumentCanvasStore()
+    store.openDraft('周报', '提交的正文')
+    const saving = store.save(true)
+    store.content = '保存期间继续输入的正文'
+    resolve(savedResult(1))
+    expect(await saving).toBe(true)
+    expect(store.content).toBe('保存期间继续输入的正文')
+    expect(store.savedContent).toBe('提交的正文')
+    expect(store.dirty).toBe(true)
+  })
+
+  it('restores a scoped local draft and retains it on version conflict', async () => {
+    const store = useDocumentCanvasStore()
+    store.initializeDraft('workspace:user')
+    store.openDraft('周报', '待恢复的正文')
+    store.documentId = 'doc-1'; store.version = 2; store.persistDraft()
+    setActivePinia(createPinia())
+    const restored = useDocumentCanvasStore()
+    restored.initializeDraft('workspace:user')
+    expect(restored.recovery?.content).toBe('待恢复的正文')
+    restored.restoreDraft()
+    vi.mocked(agentApi.updateDocument).mockRejectedValue(new Error('文档已在其他位置更新'))
+    expect(await restored.save()).toBe(false)
+    expect(agentApi.updateDocument).toHaveBeenCalledWith('doc-1', expect.objectContaining({ base_version: 2 }))
+    expect(restored.content).toBe('待恢复的正文')
+    expect(localStorage.getItem(restored.draftKey)).toContain('待恢复的正文')
   })
 })

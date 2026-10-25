@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Clock3, FilePlus2, FileText, LayoutGrid, List, Plus, RefreshCw, Search, Sparkles } from 'lucide-vue-next'
+import { Clock3, FilePlus2, FileText, LayoutGrid, List, Plus, RefreshCw, Search, Sparkles, Trash2, Undo2 } from 'lucide-vue-next'
 import { agentApi } from '@/api/agent'
 import { useDocumentCanvasStore } from '@/stores/documentCanvas'
 import type { DocumentSummary } from '@/types/api'
@@ -11,6 +11,7 @@ const loading = ref(false)
 const error = ref('')
 const query = ref('')
 const view = ref<'grid' | 'list'>('grid')
+const showTrash = ref(false)
 const filteredDocuments = computed(() => documents.value.filter((doc) =>
   doc.title.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase())))
 
@@ -18,7 +19,7 @@ const loadDocuments = async () => {
   loading.value = true
   error.value = ''
   try {
-    documents.value = await agentApi.documents()
+    documents.value = await agentApi.documents(showTrash.value ? 'deleted' : 'active')
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : '加载文档失败，请检查后端服务。'
   } finally {
@@ -26,7 +27,10 @@ const loadDocuments = async () => {
   }
 }
 
-const confirmReplace = () => !canvas.open || !canvas.dirty || window.confirm('当前文档有未保存的修改，确定要切换吗？')
+const confirmReplace = () => {
+  if (!canvas.open && canvas.recovery) return window.confirm('还有可恢复的本机草稿。继续会覆盖该草稿备份，确定继续吗？')
+  return !canvas.open || !canvas.dirty || window.confirm('当前文档有未保存的修改，确定要切换吗？')
+}
 const createDocument = () => {
   if (confirmReplace()) canvas.openDraft()
 }
@@ -34,6 +38,19 @@ const openDocument = (id: string | number) => {
   if (confirmReplace()) canvas.openDocument(id)
 }
 const dateLabel = (value?: string) => value ? new Date(value).toLocaleDateString('zh-CN') : '最近编辑'
+const removeDocument = async (doc: DocumentSummary) => {
+  if (!window.confirm(`将「${doc.title}」移入回收站？历史版本和原始附件会保留。`)) return
+  try {
+    await agentApi.deleteDocument(doc.id)
+    if (canvas.documentId === String(doc.id)) canvas.closeCanvas()
+    await loadDocuments()
+  } catch (caught) { error.value = caught instanceof Error ? caught.message : '删除失败' }
+}
+const restoreDocument = async (doc: DocumentSummary) => {
+  try { await agentApi.restoreDocument(doc.id); await loadDocuments() }
+  catch (caught) { error.value = caught instanceof Error ? caught.message : '恢复失败' }
+}
+watch(showTrash, loadDocuments)
 
 watch(() => [canvas.documentId, canvas.version], ([id, version], previous) => {
   if (id && version && (id !== previous?.[0] || version !== previous?.[1])) loadDocuments()
@@ -47,6 +64,7 @@ onMounted(loadDocuments)
       <div><h1>AI 文档</h1><p>将对话结果沉淀为可继续编辑和复用的工作成果。</p></div>
       <button class="primary-button" type="button" @click="createDocument"><Plus :size="17" /> 新建文档</button>
     </header>
+    <div v-if="canvas.recovery && !canvas.open" class="documents-message" role="status">发现本机未保存草稿「{{ canvas.recovery.title }}」 <button type="button" @click="canvas.restoreDraft()">恢复草稿</button></div>
 
     <section class="template-banner">
       <div class="template-art"><Sparkles :size="24" /></div>
@@ -55,7 +73,7 @@ onMounted(loadDocuments)
     </section>
 
     <div class="documents-toolbar">
-      <div><span class="all-documents-label">全部文档 <small>{{ documents.length }}</small></span></div>
+      <div><button type="button" :class="{ active: !showTrash }" @click="showTrash = false">全部文档</button><button type="button" :class="{ active: showTrash }" @click="showTrash = true">回收站</button><small>{{ documents.length }}</small></div>
       <div class="toolbar-right">
         <label><Search :size="15" /><input v-model="query" placeholder="搜索文档" /></label>
         <button class="view-button" :class="{ active: view === 'grid' }" type="button" aria-label="网格视图" @click="view = 'grid'"><LayoutGrid :size="16" /></button>
@@ -67,25 +85,34 @@ onMounted(loadDocuments)
     <div v-if="error" class="documents-message error" role="alert">{{ error }} <button type="button" @click="loadDocuments">重试</button></div>
     <div v-if="loading" class="documents-message">正在加载文档…</div>
     <section v-else class="document-grid" :class="{ 'list-view': view === 'list' }">
-      <button v-if="!query" class="new-document-card" type="button" @click="createDocument">
+      <button v-if="!query && !showTrash" class="new-document-card" type="button" @click="createDocument">
         <span><FilePlus2 :size="22" /></span><strong>创建空白文档</strong><small>在右侧 Canvas 中编辑</small>
       </button>
-      <button v-for="doc in filteredDocuments" :key="doc.id" class="document-card surface-card" type="button" @click="openDocument(doc.id)">
+      <article v-for="doc in filteredDocuments" :key="doc.id" class="document-card surface-card">
+        <button class="document-open" type="button" :disabled="showTrash" @click="openDocument(doc.id)">
         <div class="doc-preview violet">
           <div class="preview-lines"><i></i><i></i><i></i><i></i></div>
           <span><FileText :size="20" /></span>
         </div>
         <div class="document-info">
-          <div class="document-title"><div><span>{{ doc.docType || '文档' }}</span><h3>{{ doc.title }}</h3></div></div>
+          <div class="document-title"><div><span>{{ doc.status === 'draft' ? '草稿' : doc.docType || '文档' }}</span><h3>{{ doc.title }}</h3></div></div>
           <div class="document-meta"><span><Clock3 :size="12" />{{ dateLabel(doc.updatedAt) }}</span><span>版本 {{ doc.latestVersion || 1 }}</span></div>
         </div>
-      </button>
+        </button>
+        <div class="document-actions"><button v-if="showTrash" type="button" :aria-label="`恢复 ${doc.title}`" @click="restoreDocument(doc)"><Undo2 :size="13" />恢复文档</button><button v-else type="button" :aria-label="`删除 ${doc.title}`" @click="removeDocument(doc)"><Trash2 :size="13" />移入回收站</button></div>
+      </article>
     </section>
     <div v-if="!loading && !error && query && filteredDocuments.length === 0" class="documents-message">没有找到匹配“{{ query }}”的文档。</div>
   </div>
 </template>
 
 <style scoped>
+.document-open { width:100%; padding:0; border:0; background:transparent; text-align:left; cursor:pointer; }
+.document-open:disabled { cursor:default; }
+.document-actions { display:flex; padding:0 14px 12px; justify-content:flex-end; }
+.document-actions button { display:flex; align-items:center; gap:4px; padding:5px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg-elevated); color:var(--text-muted); font-size:10px; cursor:pointer; }
+.list-view .document-open { display:flex; flex:1; min-width:0; width:auto; align-items:center; }
+.list-view .document-actions { flex:0 0 auto; padding:8px; }
 .template-banner { position: relative; display: flex; align-items: center; gap: 18px; padding: 22px 24px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--brand) 15%, var(--border)); border-radius: 17px; background: linear-gradient(115deg, var(--brand-softer), var(--bg-elevated)); }
 .template-banner::after { position: absolute; top: -70px; right: 120px; width: 190px; height: 190px; border-radius: 50%; background: color-mix(in srgb, var(--brand) 8%, transparent); content: ''; }
 .template-art { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; flex: 0 0 auto; border-radius: 16px; background: var(--brand); color: white; box-shadow: 0 12px 26px rgba(97,87,230,.22); }

@@ -23,6 +23,11 @@ public class GlobalApiExceptionHandler {
         return response(e.getStatus(), e.getCode(), e.getMessage(), e.getDetails(), request);
     }
 
+    @ExceptionHandler(com.jianjin.assistant.domain.document.DocumentVersionConflictException.class)
+    public ResponseEntity<Map<String,Object>> documentConflict(Exception e, HttpServletRequest request) {
+        return response(HttpStatus.CONFLICT, "DOCUMENT_VERSION_CONFLICT", e.getMessage(), null, request);
+    }
+
     @ExceptionHandler({IllegalArgumentException.class, HttpMessageNotReadableException.class, MethodArgumentNotValidException.class})
     public ResponseEntity<Map<String, Object>> badRequest(Exception e, HttpServletRequest request) {
         return response(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", e.getMessage(), null, request);

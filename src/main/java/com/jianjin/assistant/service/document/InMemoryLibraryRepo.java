@@ -6,7 +6,6 @@ import com.jianjin.assistant.domain.document.Ids;
 import com.jianjin.assistant.domain.document.LibraryRepo;
 import com.jianjin.assistant.domain.document.WriteRequest;
 import com.jianjin.assistant.domain.document.WriteResult;
-import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -15,7 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-@Repository
+/** Test-only implementation. Production uses JdbcLibraryRepo. */
 public class InMemoryLibraryRepo implements LibraryRepo {
 
     private final Object mu = new Object();
@@ -44,7 +43,7 @@ public class InMemoryLibraryRepo implements LibraryRepo {
                 doc.setTitle(req.getTitle());
                 doc.setDocType(req.getDocType());
                 doc.setSource(req.getSource());
-                doc.setStatus(Document.STATUS_ACTIVE);
+                doc.setStatus(req.getStatus());
                 doc.setCreatedBy(req.getCreatedBy());
                 doc.setCreatedAt(now);
                 doc.setUpdatedAt(now);
@@ -54,10 +53,11 @@ public class InMemoryLibraryRepo implements LibraryRepo {
             } else {
                 doc = docs.get(docId);
                 if (doc == null) throw new IllegalArgumentException("document not found: " + docId);
+                if ("deleted".equals(doc.getStatus())) throw new IllegalArgumentException("document is deleted");
                 doc.setTitle(req.getTitle());
                 doc.setDocType(req.getDocType());
                 doc.setSource(req.getSource());
-                doc.setStatus(Document.STATUS_ACTIVE);
+                doc.setStatus(req.getStatus());
                 doc.setUpdatedAt(now);
                 versionNo = versions.get(docId).size() + 1;
             }
@@ -136,10 +136,31 @@ public class InMemoryLibraryRepo implements LibraryRepo {
     public boolean delete(String documentId) {
         if (documentId == null || documentId.isBlank()) throw new IllegalArgumentException("document_id is required");
         synchronized (mu) {
-            Document removed = docs.remove(documentId);
-            List<DocumentVersion> removedVersions = versions.remove(documentId);
-            if (removedVersions != null) removedVersions.forEach(version -> versionIndex.remove(version.getId()));
-            return removed != null;
+            Document doc = docs.get(documentId);
+            if (doc == null || "deleted".equals(doc.getStatus())) return false;
+            doc.setStatus("deleted");
+            return true;
+        }
+    }
+
+    @Override public List<Document> listDeleted() {
+        synchronized (mu) { return docs.values().stream().filter(d -> "deleted".equals(d.getStatus())).map(InMemoryLibraryRepo::copyOf).toList(); }
+    }
+
+    @Override public boolean restore(String id) {
+        synchronized (mu) {
+            Document doc = docs.get(id);
+            if (doc == null || !"deleted".equals(doc.getStatus())) return false;
+            doc.setStatus(Document.STATUS_ACTIVE);
+            return true;
+        }
+    }
+
+    @Override public void putVersionMetadata(String id, String key, Object value) {
+        synchronized (mu) {
+            DocumentVersion version = versionIndex.get(id);
+            if (version == null) throw new IllegalArgumentException("version not found");
+            version.getMetadata().put(key, value);
         }
     }
 

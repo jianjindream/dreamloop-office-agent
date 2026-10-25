@@ -1,6 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
 
 const mockCommonApi = async (page: Page) => {
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { user_id: 'test-user', workspace_id: 'default' } }))
+  await page.route('**/api/sessions', (route) => route.fulfill({ json: [] }))
+  await page.route('**/api/sessions?*', (route) => route.fulfill({ json: [] }))
+  await page.route('**/api/snapshots', (route) => route.fulfill({ json: [] }))
   await page.route('**/api/status', (route) => route.fulfill({ json: { rag_loaded: false, rag_mode: 'mock', tools_count: 0, llm_model: 'mock', embedding_model: 'mock', is_mock: true, infrastructure: {} } }))
   await page.route('**/api/tools', (route) => route.fulfill({ json: [] }))
   await page.route('**/api/documents', (route) => route.fulfill({ json: [] }))
@@ -33,6 +37,11 @@ test('navigation, theme and keyboard search work at each viewport', async ({ pag
 })
 
 test('chat answer becomes an editable document draft', async ({ page }) => {
+  await page.route('**/api/sessions', (route) => route.fulfill({ json: [{ id: 'session-1', title: '产品方案', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), message_count: 2 }] }))
+  await page.route('**/api/sessions/session-1/messages?*', (route) => route.fulfill({ json: [
+    { id: 1, role: 'user', content: '写一份产品方案', created_at: new Date().toISOString() },
+    { id: 2, role: 'assistant', content: '# 新产品方案\n\n项目目标', created_at: new Date().toISOString() },
+  ] }))
   await page.addInitScript(() => {
     const now = Date.now()
     localStorage.setItem('dreamloop-chat-sessions-v2', JSON.stringify([{ id: 'session-1', title: '产品方案', createdAt: now, updatedAt: now, messages: [

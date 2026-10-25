@@ -87,7 +87,7 @@ const updateRunningEvents = (message: ChatMessage) => {
 const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
   const data = event.data as Record<string, unknown>
   if (typeof data.task_id === 'string') activeTaskId.value = data.task_id
-  const assistant = chat.currentSession?.messages.find((item) => item.id === messageId)
+  const assistant = chat.findMessage(messageId)
   if (!assistant) return
 
   switch (event.type) {
@@ -154,8 +154,9 @@ const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
 
 const sendMessage = async (content = prompt.value, appendUser = true) => {
   const text = content.trim()
-  if (!text || isStreaming.value) return
+  if (!text || isStreaming.value || !chat.initialized || chat.historyLoading || chat.currentSession?.loadError) return
   const session = chat.ensureSession()
+  chat.activeSessionId = session.id
   if (appendUser) {
     chat.addMessage({ role: 'user', content: text, status: 'complete', execution: [], sources: [] })
   }
@@ -184,7 +185,7 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
         onEvent: (event) => handleStreamEvent(assistant.id, event),
       },
     )
-    const latest = chat.currentSession?.messages.find((item) => item.id === assistant.id)
+    const latest = chat.findMessage(assistant.id)
     if (latest?.status === 'streaming') {
       chat.updateMessage(assistant.id, {
         status: latest.content ? 'complete' : 'error',
@@ -202,6 +203,8 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
     }
   } finally {
     chat.persist()
+    chat.activeSessionId = ''
+    void chat.refreshSessions().catch(() => undefined)
     isStreaming.value = false
     activeMessageId.value = ''
     activeTaskId.value = ''
@@ -217,10 +220,22 @@ const toDocument = (messageId: string) => {
   const message = session.messages[index]
   if (!message?.content.trim()) return
   if (canvas.open && canvas.dirty && !window.confirm('当前文档有未保存的修改，确定要用此回答创建新草稿吗？')) return
+  if (!canvas.open && canvas.recovery && !window.confirm('还有可恢复的本机草稿。继续会覆盖该草稿备份，确定继续吗？')) return
   const question = [...session.messages.slice(0, index)].reverse().find((item) => item.role === 'user')?.content ?? ''
   const heading = message.content.match(/^#{1,3}\s+(.+)$/m)?.[1]
   const title = (heading || question.replace(/\s+/g, ' ').slice(0, 36) || '对话生成的文档').trim()
   canvas.openDraft(title, message.content, session.id, message.id)
+}
+
+const renameSession = async () => {
+  const session = chat.currentSession
+  if (!session || isStreaming.value) return
+  const title = window.prompt('新的会话名称', session.title)
+  if (title?.trim()) await chat.renameSession(session.id, title)
+}
+const deleteSession = async () => {
+  const session = chat.currentSession
+  if (session && !isStreaming.value && window.confirm('删除此会话及其消息？此操作无法撤销。')) await chat.deleteSession(session.id)
 }
 
 const stopGeneration = async () => {
@@ -286,7 +301,6 @@ const uploadAttachment = async (event: Event) => {
 }
 
 onMounted(async () => {
-  if (chat.currentSessionId && !chat.currentSession) chat.currentSessionId = ''
   try {
     availableTools.value = await agentApi.tools()
   } catch {
@@ -299,6 +313,9 @@ onBeforeUnmount(() => abortController.value?.abort())
 
 <template>
   <div class="chat-page" :class="{ 'has-messages': hasMessages }">
+    <div v-if="chat.currentSession" class="session-actions"><span>{{ chat.currentSession.title }}</span><button type="button" :disabled="isStreaming" @click="renameSession">重命名会话</button><button type="button" :disabled="isStreaming" @click="deleteSession">删除会话</button></div>
+    <p v-if="chat.initializing || chat.historyLoading" class="session-feedback" role="status">正在加载服务端会话…</p>
+    <p v-if="chat.error || chat.currentSession?.loadError" class="session-feedback" role="alert">{{ chat.error || chat.currentSession?.loadError }} <button type="button" @click="chat.retrySync()">重新加载</button></p>
     <div v-if="!hasMessages" class="welcome-canvas">
       <section class="welcome-block">
         <div class="ai-orb"><span></span><ShieldCheck :size="25" stroke-width="1.7" /></div>
@@ -347,7 +364,7 @@ onBeforeUnmount(() => abortController.value?.abort())
             </div>
           </div>
           <button v-if="isStreaming" class="stop-button" type="button" aria-label="停止生成" @click="stopGeneration"><Square :size="13" fill="currentColor" /></button>
-          <button v-else class="send-button" :disabled="!prompt.trim()" type="button" aria-label="发送消息" @click="sendMessage()"><ArrowUp :size="18" /></button>
+          <button v-else class="send-button" :disabled="!prompt.trim() || !chat.initialized || chat.historyLoading || Boolean(chat.currentSession?.loadError)" type="button" aria-label="发送消息" @click="sendMessage()"><ArrowUp :size="18" /></button>
         </div>
       </section>
       <div class="composer-note"><span><i></i> 企业数据仅在当前工作区内使用</span><span>Enter 发送 · Shift + Enter 换行</span></div>
@@ -356,6 +373,10 @@ onBeforeUnmount(() => abortController.value?.abort())
 </template>
 
 <style scoped>
+.session-actions { display:flex; width:100%; flex:0 0 auto; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--border); font-size:11px; }
+.session-actions span { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-muted); }
+.session-actions button,.session-feedback button { border:0; background:transparent; color:var(--brand); cursor:pointer; font-size:11px; }
+.session-feedback { padding:8px; margin:0; color:var(--text-muted); font-size:12px; }
 .chat-page { display: flex; width: 100%; min-height: 100%; padding: 34px 30px 30px; flex-direction: column; align-items: center; justify-content: center; }.chat-page.has-messages { height: 100%; min-height: 0; padding: 0; justify-content: flex-start; }.welcome-canvas { width: min(760px,100%); }.welcome-block { text-align: center; }.ai-orb { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 54px; margin-bottom: 15px; border: 1px solid color-mix(in srgb,var(--brand) 20%,var(--border)); border-radius: 18px; background: linear-gradient(145deg,var(--bg-elevated),var(--brand-softer)); color: var(--brand); box-shadow: 0 14px 34px rgba(88,77,210,.12); }.ai-orb span { position: absolute; width: 32px; height: 32px; border-radius: 50%; background: color-mix(in srgb,var(--brand) 18%,transparent); filter: blur(12px); }.ai-orb svg { position: relative; }.welcome-block em { display: block; color: var(--brand); font-size: 10px; font-style: normal; font-weight: 700; letter-spacing: .08em; }.welcome-block h2 { margin: 8px 0 0; color: var(--text-strong); font-size: clamp(25px,3vw,32px); font-weight: 680; letter-spacing: -.045em; }.welcome-block p { margin: 10px 0 0; color: var(--text-muted); font-size: 13px; }
 .document-context-chip{display:flex;align-items:center;max-width:100%;gap:5px;margin:0 0 7px 3px;padding:6px 9px;overflow:hidden;border:1px solid var(--border);border-radius:8px;background:var(--bg-elevated);color:var(--text-muted);font-size:9px;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.document-context-chip.active{border-color:color-mix(in srgb,var(--brand) 25%,var(--border));background:var(--brand-softer);color:var(--brand)}
 .suggestion-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 32px; }.suggestion-card { display: flex; align-items: center; min-width: 0; gap: 11px; padding: 13px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb,var(--bg-elevated) 90%,transparent); box-shadow: var(--shadow-sm); text-align: left; cursor: pointer; transition: 170ms; }.suggestion-card:hover { border-color: color-mix(in srgb,var(--brand) 22%,var(--border)); background: var(--bg-elevated); box-shadow: var(--shadow-md); transform: translateY(-2px); }.suggestion-icon { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; flex: 0 0 auto; border-radius: 11px; }.suggestion-icon.violet{background:var(--brand-soft);color:var(--brand)}.suggestion-icon.blue{background:#eaf3ff;color:#3978bd}.suggestion-icon.amber{background:var(--warning-soft);color:var(--warning)}.suggestion-icon.green{background:var(--success-soft);color:var(--success)}.suggestion-card>span:nth-child(2){display:flex;min-width:0;flex:1;flex-direction:column}.suggestion-card strong{color:var(--text-strong);font-size:12px;font-weight:630}.suggestion-card small{margin-top:4px;overflow:hidden;color:var(--text-faint);font-size:9px;text-overflow:ellipsis;white-space:nowrap}.suggestion-arrow{color:var(--text-faint);opacity:0;transform:rotate(45deg);transition:160ms}.suggestion-card:hover .suggestion-arrow{opacity:1}

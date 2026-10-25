@@ -19,6 +19,10 @@ import com.jianjin.assistant.service.agent.UnifiedAgentService;
 import com.jianjin.assistant.service.document.DocumentLibraryService;
 import com.jianjin.assistant.service.document.DocumentParser;
 import com.jianjin.assistant.service.document.UploadProgressService;
+import com.jianjin.assistant.service.document.AttachmentStore;
+import org.springframework.core.io.Resource;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentity;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentityHolder;
 import com.jianjin.assistant.interfaces.http.error.ApiException;
@@ -71,6 +75,7 @@ public class AgentController {
     private final DocumentLibraryService library;
     private final ChatTaskRegistry tasks;
     private final UploadProgressService uploadProgress;
+    private final AttachmentStore attachments;
 
     public AgentController(ChatApplicationService chat,
                            UnifiedAgentService agent,
@@ -80,7 +85,8 @@ public class AgentController {
                            DocumentParser parser,
                            DocumentLibraryService library,
                            ChatTaskRegistry tasks,
-                           UploadProgressService uploadProgress) {
+                           UploadProgressService uploadProgress,
+                           AttachmentStore attachments) {
         this.chat = chat;
         this.agent = agent;
         this.infra = infra;
@@ -90,6 +96,7 @@ public class AgentController {
         this.library = library;
         this.tasks = tasks;
         this.uploadProgress = uploadProgress;
+        this.attachments = attachments;
     }
 
     /** POST /api/chat — 统一对话入口（同步模式，向后兼容） */
@@ -249,8 +256,18 @@ public class AgentController {
                         "parser", pr.parser, "pages", pr.pages,
                         "text_chars", pr.textChars, "needs_ocr", pr.needsOCR)));
         req.getMetadata().put("owner_key", identity.ownerKey());
+        String attachmentKey = attachments.save(data);
+        req.getMetadata().put("original_attachment", attachmentKey);
+        req.getMetadata().put("original_filename", title);
+        req.getMetadata().put("original_size", data.length);
         uploadProgress.update(identity.ownerKey(), uploadId, 70, "indexing", "正在写入文档和检索索引");
-        DocumentLibraryService.Result res = library.writeDocument(req, true);
+        DocumentLibraryService.Result res;
+        try { res = library.writeDocument(req, true); }
+        catch (RuntimeException e) {
+            // Keep bytes on ambiguous indexing/metadata failures: the document may already be committed.
+            uploadProgress.update(identity.ownerKey(), uploadId, 0, "failed", "保存失败，请检查文档列表后重试");
+            throw e;
+        }
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("filename", pr.filename);
@@ -262,11 +279,14 @@ public class AgentController {
         out.put("document_id", res.document.getId());
         out.put("version_id", res.version.getId());
         out.put("upload_id", uploadId);
+        out.put("document_saved", true);
+        out.put("index_status", res.indexStatus);
+        if (res.indexError != null) out.put("index_error", res.indexError);
         if (res.ingestChunks != null) {
             out.put("chunk_count", res.ingestChunks);
             out.put("doc_hash", res.ingestDocHash);
         }
-        uploadProgress.update(identity.ownerKey(), uploadId, 100, "completed", "处理完成");
+        uploadProgress.update(identity.ownerKey(), uploadId, 100, "completed", res.indexError == null ? "处理完成" : res.indexError);
         return out;
     }
 
@@ -277,9 +297,10 @@ public class AgentController {
 
     /** GET /api/documents — 文档库列表 */
     @GetMapping("/documents")
-    public List<Document> listDocuments() {
+    public List<Document> listDocuments(@RequestParam(value="status", defaultValue="active") String status) {
         String owner = RequestIdentityHolder.current().ownerKey();
-        return library.list().stream().filter(document -> ownsDocument(document.getId(), owner)).toList();
+        return ("deleted".equals(status) ? library.listDeleted() : library.list()).stream()
+                .filter(document -> ownsDocument(document.getId(), owner)).toList();
     }
 
     /** GET /api/documents/{id} — 取单个文档（含最新版本正文） */
@@ -292,12 +313,44 @@ public class AgentController {
         return out;
     }
 
-    /** DELETE /api/documents/{id} — delete the document record and every immutable version. */
+    /** DELETE /api/documents/{id} — move to trash, retaining immutable versions and original bytes. */
     @DeleteMapping("/documents/{id}")
     public Map<String, Object> deleteDocument(@PathVariable("id") String id) {
         ownedDocument(id);
         if (!library.delete(id)) throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
         return Map.of("ok", true, "document_id", id);
+    }
+
+    @PostMapping("/documents/{id}/restore")
+    public Map<String,Object> restoreDocument(@PathVariable String id) {
+        ownedDocument(id, true);
+        if (!library.restore(id)) throw new ApiException("DOCUMENT_NOT_IN_TRASH", "文档不在回收站中", HttpStatus.CONFLICT);
+        return Map.of("ok", true, "document_id", id, "index_status", "not_indexed");
+    }
+
+    @PostMapping("/documents/{id}/reindex")
+    public Map<String,Object> reindexDocument(@PathVariable String id) {
+        ownedDocument(id);
+        try {
+            var result = library.reingest(id, null);
+            return Map.of("ok", true, "index_status", "indexed", "chunk_count", result.getKey(), "doc_hash", result.getValue());
+        } catch (RuntimeException e) {
+            throw new ApiException("DOCUMENT_INDEX_FAILED", "文档仍已保存，知识库索引失败，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE);
+        }
+    }
+
+    @GetMapping("/documents/{id}/original")
+    public ResponseEntity<Resource> originalDocument(@PathVariable String id) {
+        var document = ownedDocument(id);
+        Object key = document.version.getMetadata().get("original_attachment");
+        if (key == null) throw new ApiException("ATTACHMENT_NOT_FOUND", "该文档没有原始附件", HttpStatus.NOT_FOUND);
+        Resource resource;
+        try { resource = attachments.read(String.valueOf(key)); }
+        catch (IllegalArgumentException e) { throw new ApiException("ATTACHMENT_NOT_FOUND", "原始附件不存在", HttpStatus.NOT_FOUND); }
+        String filename = String.valueOf(document.version.getMetadata().getOrDefault("original_filename", document.document.getTitle()));
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment().filename(filename, StandardCharsets.UTF_8).build().toString())
+                .body(resource);
     }
 
     /** GET /api/documents/{id}/versions — 按新到旧查看版本。 */
@@ -316,11 +369,15 @@ public class AgentController {
         boolean ingest = Boolean.TRUE.equals(req.get("ingest_to_rag"));
         WriteRequest wr = new WriteRequest(title, docType, Document.SOURCE_UPLOAD, RequestIdentityHolder.current().ownerKey(),
                 content, "", documentMetadata(req));
+        wr.setStatus(Boolean.TRUE.equals(req.get("draft")) ? "draft" : "active");
         DocumentLibraryService.Result res = library.writeDocument(wr, ingest);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("document", res.document);
         out.put("version", res.version);
         out.put("created", res.created);
+        out.put("document_saved", true);
+        out.put("index_status", res.indexStatus);
+        if (res.indexError != null) out.put("index_error", res.indexError);
         if (res.ingestChunks != null) {
             out.put("chunk_count", res.ingestChunks);
             out.put("doc_hash", res.ingestDocHash);
@@ -341,11 +398,16 @@ public class AgentController {
         WriteRequest wr = new WriteRequest(title, docType, current.document.getSource(),
                 current.document.getCreatedBy(), content, current.version.getSummary(), metadata);
         wr.setDocumentId(id);
+        if (req.get("base_version") instanceof Number baseVersion) wr.setBaseVersion(baseVersion.intValue());
+        wr.setStatus(Boolean.TRUE.equals(req.get("draft")) ? "draft" : "active");
         DocumentLibraryService.Result res = library.writeDocument(wr, Boolean.TRUE.equals(req.get("ingest_to_rag")));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("document", res.document);
         out.put("version", res.version);
         out.put("created", false);
+        out.put("document_saved", true);
+        out.put("index_status", res.indexStatus);
+        if (res.indexError != null) out.put("index_error", res.indexError);
         return out;
     }
 
@@ -354,7 +416,8 @@ public class AgentController {
         Map<String, Object> metadata = new LinkedHashMap<>();
         if (value instanceof Map<?, ?> raw) {
             raw.forEach((key, item) -> {
-                if (key instanceof String && !"owner_key".equals(key)) metadata.put((String) key, item);
+                if (key instanceof String name && !"owner_key".equals(name) && !"doc_hash".equals(name)
+                        && !name.startsWith("index_") && !name.startsWith("original_")) metadata.put(name, item);
             });
         }
         metadata.put("owner_key", RequestIdentityHolder.current().ownerKey());
@@ -437,9 +500,9 @@ public class AgentController {
 
     /** GET /api/sessions — server-side conversation list scoped to the authenticated workspace user. */
     @GetMapping("/sessions")
-    public List<Map<String, Object>> sessions() {
+    public List<Map<String, Object>> sessions(@RequestParam(value="q", defaultValue="") String query) {
         List<Map<String, Object>> out = new ArrayList<>();
-        for (var row : infra.listChatSessions(RequestIdentityHolder.current().ownerKey())) {
+        for (var row : infra.searchChatSessions(RequestIdentityHolder.current().ownerKey(), query)) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id", row.sessionId); item.put("title", row.title); item.put("created_at", row.createdAt);
             item.put("updated_at", row.updatedAt); item.put("message_count", row.messageCount); out.add(item);
@@ -453,7 +516,7 @@ public class AgentController {
             @RequestParam(value="limit", defaultValue="200") int limit) {
         int safeLimit = Math.max(1, Math.min(500, limit));
         List<Map<String, Object>> out = new ArrayList<>();
-        for (var row : infra.loadChatHistory(RequestIdentityHolder.current().ownerKey(), sessionId, afterId, safeLimit)) {
+        for (var row : infra.pageChatMessages(RequestIdentityHolder.current().ownerKey(), sessionId, afterId, safeLimit)) {
             out.add(Map.of("id", row.id, "role", row.role, "content", row.content, "created_at", row.createdAt));
         }
         return out;
@@ -565,6 +628,10 @@ public class AgentController {
     }
 
     private LibraryRepo.DocumentWithVersion ownedDocument(String id) {
+        return ownedDocument(id, false);
+    }
+
+    private LibraryRepo.DocumentWithVersion ownedDocument(String id, boolean includeDeleted) {
         LibraryRepo.DocumentWithVersion document;
         try {
             document = library.get(id);
@@ -572,6 +639,9 @@ public class AgentController {
             throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
         }
         Object owner = document.version.getMetadata().get("owner_key");
+        if (!includeDeleted && "deleted".equals(document.document.getStatus())) {
+            throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
+        }
         String current = RequestIdentityHolder.current().ownerKey();
         if (owner == null && "default:default".equals(current)) return document;
         if (!current.equals(String.valueOf(owner))) {

@@ -12,6 +12,8 @@ public class WriteRequest {
     private String createdBy;
     private String contentMd;
     private String summary = "";
+    private String status = Document.STATUS_ACTIVE;
+    private Integer baseVersion;
     private Map<String, Object> metadata = new LinkedHashMap<>();
 
     public WriteRequest() {}
@@ -46,6 +48,10 @@ public class WriteRequest {
     private static String trim(String s) { return s == null ? "" : s.trim(); }
 
     public String getDocumentId() { return documentId; }
+    public String getStatus() { return status; }
+    public Integer getBaseVersion() { return baseVersion; }
+    public void setBaseVersion(Integer baseVersion) { this.baseVersion = baseVersion; }
+    public void setStatus(String status) { this.status = "draft".equals(status) ? "draft" : Document.STATUS_ACTIVE; }
     public void setDocumentId(String documentId) { this.documentId = documentId == null ? "" : documentId; }
     public String getTitle() { return title; }
     public void setTitle(String title) { this.title = title; }

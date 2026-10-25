@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent } from 'vue'
+import { computed, defineAsyncComponent, onMounted, watch } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
 import AppSidebar from '@/components/app/AppSidebar.vue'
 import AppTopbar from '@/components/app/AppTopbar.vue'
 import ContextPanel from '@/components/app/ContextPanel.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useDocumentCanvasStore } from '@/stores/documentCanvas'
+import { useChatStore } from '@/stores/chat'
 
 const route = useRoute()
 const workspace = useWorkspaceStore()
 const canvas = useDocumentCanvasStore()
+const chat = useChatStore()
+onMounted(() => { void chat.initialize() })
+watch(() => chat.cacheScope, (scope) => { if (scope) canvas.initializeDraft(scope) })
 const DocumentCanvas = defineAsyncComponent(() => import('@/components/document/DocumentCanvas.vue'))
 const showCanvas = computed(() => canvas.open && (route.name === 'chat' || route.name === 'documents'))
 const showContext = computed(() => !showCanvas.value && Boolean(route.meta.showContext) && workspace.contextOpen)

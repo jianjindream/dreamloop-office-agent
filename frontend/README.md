@@ -58,7 +58,7 @@ npm audit --registry=https://registry.npmjs.org --audit-level=moderate
 
 - 使用 `POST /api/chat/stream` 接收语义事件流
 - 支持停止生成、失败重试和服务状态探测
-- 会话与消息保存到浏览器本地存储
+- 会话与完整消息从服务端读取，浏览器按用户和工作区缓存；支持搜索、重命名、删除及旧本地会话迁移
 - Markdown 内容经过 DOMPurify 清洗后渲染
 - 常用语言使用 Shiki 高亮，并支持复制代码
 - 工具调用、执行步骤和知识库引用可视化
@@ -67,7 +67,7 @@ npm audit --registry=https://registry.npmjs.org --audit-level=moderate
 ## 工作区管理能力
 
 - 知识库读取真实文档列表，支持拖拽/批量上传、上传进度、解析结果与正文详情
-- 已上传文档可移除 RAG 索引；后端暂未提供删除文档记录接口
+- 已上传文档可移除 RAG 索引；文档页支持回收站及恢复，原始附件可下载
 - 工具中心读取运行时工具清单，支持参数化注册 HTTP MCP 工具
 - 系统状态展示模型、RAG、记忆、执行快照与五类基础设施连接状态
 - 状态页每 30 秒自动刷新，并保留明确的空态、失败态与降级提示
@@ -76,7 +76,8 @@ npm audit --registry=https://registry.npmjs.org --audit-level=moderate
 
 - `/documents` 展示后端真实文档，可搜索、切换列表/网格并在右侧 Canvas 编辑 Markdown
 - 聊天回答可转为文档草稿；打开文档时可在聊天输入区选择是否引用当前正文
-- AI 改写、扩写、总结会先更新草稿，由用户确认后手动保存
+- AI 改写、扩写、总结会更新当前正文，自动保存保留版本；用户可继续编辑或载入历史版本
 - 新建使用 `POST /api/documents`，保存更新使用 `PUT /api/documents/{id}`，每次保存创建新版本
 - 历史版本通过 `GET /api/documents/{id}/versions` 查看；可载入旧版正文再另存为新版本
-- 当前文档库使用后端内存仓储，重启后历史不会保留；持久化存储留待后续阶段接入
+- 文档与版本使用后端文件数据库或 PostgreSQL，重启后保留；编辑停止两秒自动保存，浏览器草稿可恢复，过期版本保存返回冲突
+- 正文保存与知识库索引分别显示；索引失败可单独重试

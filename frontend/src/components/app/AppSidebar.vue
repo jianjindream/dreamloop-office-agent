@@ -15,7 +15,7 @@ import {
 } from 'lucide-vue-next'
 import { RouterLink } from 'vue-router'
 import { useRouter } from 'vue-router'
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import { useWorkspaceStore } from '@/stores/workspace'
 
@@ -31,7 +31,17 @@ const navigation = [
   { label: '系统状态', to: '/status', icon: Activity },
 ]
 
-const recentChats = computed(() => chatStore.sortedSessions.slice(0, 5))
+const search = ref('')
+const recentChats = computed(() => chatStore.sortedSessions.filter((session) => chatStore.searchIds === null || chatStore.searchIds.includes(session.id)))
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+watch(search, (value) => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => { void chatStore.searchSessions(value) }, 250)
+})
+onBeforeUnmount(() => clearTimeout(searchTimer))
+const migrate = () => {
+  if (window.confirm('将此浏览器中保留的旧对话导入当前账号和工作区？原始记录仍会保留。')) void chatStore.migrateLegacy()
+}
 
 const newChat = () => {
   chatStore.createSession()
@@ -102,8 +112,14 @@ const formatTime = (timestamp: number) => {
 
     <div class="recent-section">
       <div class="section-label">
-        <span>最近对话</span>
+        <span>会话历史</span>
+        <button type="button" aria-label="刷新会话历史" :disabled="chatStore.syncing" @click="chatStore.refreshSessions().catch(() => undefined)">刷新</button>
       </div>
+      <input v-model="search" class="session-search" aria-label="搜索会话标题和内容" placeholder="搜索会话标题和内容" />
+      <p v-if="chatStore.initializing" class="session-hint">正在同步会话…</p>
+      <p v-if="chatStore.error" class="session-hint" role="alert">{{ chatStore.error }}<button type="button" @click="chatStore.retrySync()">重试</button></p>
+      <p v-if="chatStore.migrationError" class="session-hint" role="alert">{{ chatStore.migrationError }}</p>
+      <button v-if="chatStore.migrationAvailable" type="button" class="recent-item" @click="migrate">迁移此浏览器旧对话</button>
       <button
         v-for="chat in recentChats"
         :key="chat.id"
@@ -369,8 +385,10 @@ const formatTime = (timestamp: number) => {
 .recent-section {
   min-height: 0;
   margin-top: 24px;
-  overflow: hidden;
+  overflow-y: auto;
 }
+.session-search { width:100%; margin-bottom:6px; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--bg-elevated); color:var(--text); font-size:11px; }
+.session-hint { padding:5px; color:var(--text-muted); font-size:11px; overflow-wrap:anywhere; }
 
 .section-label {
   display: flex;

@@ -87,7 +87,8 @@ export const uploadFileWithProgress = (
 export const agentApi = {
   status: () => request<SystemStatus>('/api/status'),
   tools: () => request<ToolSummary[]>('/api/tools'),
-  documents: () => request<DocumentSummary[]>('/api/documents'),
+  identity: () => request<{ user_id: string; workspace_id: string }>('/api/auth/me'),
+  documents: (status = 'active') => request<DocumentSummary[]>(status === 'active' ? '/api/documents' : `/api/documents?status=${encodeURIComponent(status)}`),
   document: (id: string | number) => request<DocumentDetail>(`/api/documents/${encodeURIComponent(id)}`),
   documentVersions: (id: string | number) => request<DocumentVersion[]>(`/api/documents/${encodeURIComponent(id)}/versions`),
   createDocument: (payload: DocumentWritePayload) =>
@@ -99,9 +100,18 @@ export const agentApi = {
     }),
   deleteDocument: (id: string | number) =>
     request<ApiOperationResult>(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  sessions: () => request<ServerSession[]>('/api/sessions'),
-  sessionMessages: (id: string, afterId = 0) =>
-    request<ServerMessage[]>(`/api/sessions/${encodeURIComponent(id)}/messages?after_id=${afterId}`),
+  restoreDocument: (id: string | number) => request<ApiOperationResult>(`/api/documents/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
+  reindexDocument: (id: string | number) => request<ApiOperationResult>(`/api/documents/${encodeURIComponent(id)}/reindex`, { method: 'POST' }),
+  downloadOriginal: async (id: string | number) => {
+    const response = await fetch(`${API_BASE_URL}/api/documents/${encodeURIComponent(id)}/original`, { headers: identityHeaders })
+    if (!response.ok) throw new ApiError('原始附件下载失败', response.status)
+    return response.blob()
+  },
+  sessions: (query = '') => request<ServerSession[]>(query ? `/api/sessions?q=${encodeURIComponent(query)}` : '/api/sessions'),
+  sessionMessages: (id: string, afterId = 0, limit = 500) =>
+    request<ServerMessage[]>(`/api/sessions/${encodeURIComponent(id)}/messages?after_id=${afterId}&limit=${limit}`),
+  importSession: (payload: { id: string; title: string; createdAt: number; messages: { role: string; content: string; createdAt: number }[] }) =>
+    request<ApiOperationResult & { imported: boolean }>('/api/sessions/import', { method: 'POST', body: JSON.stringify(payload) }),
   renameSession: (id: string, title: string) =>
     request<ApiOperationResult>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
   deleteSession: (id: string) =>

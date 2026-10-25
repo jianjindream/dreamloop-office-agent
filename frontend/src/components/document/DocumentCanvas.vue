@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Check, ChevronDown, Clock3, FileText, LoaderCircle,
@@ -32,7 +32,31 @@ const aiLabels: Record<AiAction, string> = { rewrite: '改写', expand: '扩写'
 const wordCount = computed(() => canvas.content.replace(/\s/g, '').length)
 const sourceSession = computed(() => chat.sessions.find((session) => session.id === canvas.sourceSessionId))
 const sourceMessage = computed(() => sourceSession.value?.messages.find((message) => message.id === canvas.sourceMessageId))
-const canSave = computed(() => !canvas.loading && !canvas.saving && canvas.dirty)
+const canSave = computed(() => !canvas.loading && !canvas.saving && (canvas.dirty || canvas.status === 'draft'))
+let autosaveTimer: ReturnType<typeof setTimeout> | undefined
+watch(() => [canvas.title, canvas.content, canvas.loading, canvas.saving, aiBusy.value], () => {
+  canvas.persistDraft()
+  clearTimeout(autosaveTimer)
+  if (canvas.open && canvas.dirty && !canvas.loading && !canvas.saving && !aiBusy.value && !canvas.error && canvas.content.trim() && canvas.title.trim()) {
+    autosaveTimer = setTimeout(() => { void canvas.save(true) }, 2000)
+  }
+})
+const backupOnExit = () => canvas.persistDraft()
+window.addEventListener('pagehide', backupOnExit)
+onBeforeUnmount(() => { clearTimeout(autosaveTimer); backupOnExit(); window.removeEventListener('pagehide', backupOnExit) })
+const retryIndex = async () => {
+  try { await agentApi.reindexDocument(canvas.documentId); canvas.indexStatus = 'indexed'; canvas.notice = '知识库索引已完成。' }
+  catch (error) { canvas.error = error instanceof Error ? error.message : '索引失败，文档仍已保存。' }
+}
+const downloadOriginal = async () => {
+  try {
+    const blob = await agentApi.downloadOriginal(canvas.documentId)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url; link.download = canvas.originalFilename; link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (error) { canvas.error = error instanceof Error ? error.message : '原始附件下载失败' }
+}
 
 watch(() => canvas.requestId, () => {
   historyOpen.value = false
@@ -145,9 +169,10 @@ const jumpToChat = () => {
           <template v-else><h2>历史版本</h2><p>每次保存都会保留一个独立版本。</p><div v-if="historyLoading" class="muted-line">正在加载…</div><div v-else-if="historyError" class="error-line">{{ historyError }}</div><button v-for="item in versions" :key="item.id" class="version-row" type="button" @click="selectedVersion = item"><span>版本 {{ item.version }}</span><small>{{ item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN') : '' }}</small></button></template>
         </div>
         <template v-else>
-          <div class="document-head"><span class="eyebrow">{{ canvas.sourceMessageId ? '由聊天回答创建' : '工作区文档' }}</span><input v-model="canvas.title" aria-label="文档标题" placeholder="文档标题" :readonly="aiBusy || canvas.saving" /><div class="document-subtitle"><span>{{ wordCount }} 字</span><span>·</span><span>{{ canvas.dirty ? '有未保存的修改' : '所有修改已保存' }}</span></div></div>
+          <div class="document-head"><span class="eyebrow">{{ canvas.sourceMessageId ? '由聊天回答创建' : '工作区文档' }}</span><input v-model="canvas.title" aria-label="文档标题" placeholder="文档标题" :readonly="aiBusy" /><div class="document-subtitle"><span>{{ wordCount }} 字</span><span>·</span><span>{{ canvas.saving ? '正在保存…' : canvas.dirty ? '有未保存的修改' : '所有修改已保存' }}</span><span>·</span><span>{{ canvas.status === 'draft' ? '草稿' : '已保存文档' }}</span></div></div>
+          <div v-if="canvas.documentId" class="storage-actions"><span>知识库：{{ canvas.indexStatus === 'indexed' ? '已索引' : canvas.indexStatus === 'failed' ? '索引失败，正文已保存' : '未索引' }}</span><button type="button" :disabled="canvas.dirty || canvas.saving" @click="retryIndex">{{ canvas.indexStatus === 'failed' ? '重试索引' : '建立索引' }}</button><button v-if="canvas.hasOriginal" type="button" @click="downloadOriginal">下载原始附件</button></div>
           <div v-if="canvas.sourceSessionId" class="source-link"><span><Sparkles :size="13" />关联对话：{{ sourceSession?.title || '会话' }}<small v-if="sourceMessage">{{ sourceMessage.content.slice(0, 42) }}</small></span><button type="button" @click="jumpToChat">查看对话</button></div>
-          <textarea v-if="mode === 'edit'" v-model="canvas.content" class="document-editor" aria-label="Markdown 文档正文" placeholder="开始撰写文档内容…\n\n支持 Markdown 标题、列表和引用。" :readonly="aiBusy || canvas.saving"></textarea>
+          <textarea v-if="mode === 'edit'" v-model="canvas.content" class="document-editor" aria-label="Markdown 文档正文" placeholder="开始撰写文档内容…\n\n支持 Markdown 标题、列表和引用。" :readonly="aiBusy"></textarea>
           <div v-else class="document-preview"><MarkdownContent v-if="canvas.content" :content="canvas.content" /><p v-else class="empty-preview">正文为空，切换到编辑模式开始写作。</p></div>
         </template>
       </div>
@@ -160,6 +185,8 @@ const jumpToChat = () => {
 </template>
 
 <style scoped>
+.storage-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px; color:var(--text-muted); font-size:11px; }
+.storage-actions button { padding:4px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg-elevated); color:var(--brand); cursor:pointer; }
 .document-canvas{display:flex;min-width:0;height:100%;flex-direction:column;border-left:1px solid var(--border);background:var(--bg-elevated);box-shadow:-12px 0 38px rgba(27,29,54,.045)}
 .canvas-header{display:flex;align-items:center;justify-content:space-between;height:var(--topbar-height);padding:0 20px;border-bottom:1px solid var(--border)}.canvas-identity{display:flex;align-items:center;gap:10px}.canvas-icon{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;background:var(--brand-soft);color:var(--brand)}.canvas-identity div{display:flex;flex-direction:column;gap:2px}.canvas-identity small{color:var(--text-faint);font-size:8px;letter-spacing:.1em}.canvas-identity strong{color:var(--text-strong);font-size:11px}
 .canvas-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 20px;border-bottom:1px solid var(--border)}.mode-switch{display:flex;gap:2px;padding:3px;border-radius:9px;background:var(--bg-hover)}.mode-switch button{display:flex;align-items:center;gap:5px;padding:6px 9px;border:0;border-radius:7px;background:transparent;color:var(--text-muted);font-size:10px;cursor:pointer}.mode-switch button.active{background:var(--bg-elevated);color:var(--brand);box-shadow:var(--shadow-sm)}.ai-selector{position:relative}.ai-trigger{display:flex;align-items:center;gap:5px;padding:8px 9px;border:1px solid color-mix(in srgb,var(--brand) 20%,var(--border));border-radius:8px;background:var(--brand-softer);color:var(--brand);font-size:10px;font-weight:650;cursor:pointer}.ai-trigger:disabled{opacity:.5;cursor:default}.ai-menu{position:absolute;z-index:20;top:37px;right:0;width:180px;padding:5px;border:1px solid var(--border);border-radius:11px;background:var(--bg-elevated);box-shadow:var(--shadow-md)}.ai-menu button{display:flex;width:100%;flex-direction:column;gap:3px;padding:9px;border:0;border-radius:8px;background:transparent;color:var(--text-strong);font-size:10px;text-align:left;cursor:pointer}.ai-menu button:hover{background:var(--bg-hover)}.ai-menu small{color:var(--text-faint);font-size:8px}

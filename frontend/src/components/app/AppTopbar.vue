@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Bell,
@@ -41,11 +41,13 @@ const results = computed(() => {
   const query = search.value.trim().toLocaleLowerCase()
   const items = [
     ...pages.map((item) => ({ ...item, kind: 'page', id: item.to })),
-    ...chat.sortedSessions.slice(0, 10).map((item) => ({ label: item.title, description: '最近对话', to: '/chat', kind: 'chat', id: item.id })),
+    ...chat.sortedSessions.filter((item) => chat.searchIds === null || chat.searchIds.includes(item.id)).map((item) => ({ label: item.title, description: '会话历史', to: '/chat', kind: 'chat', id: item.id })),
     ...documents.value.slice(0, 20).map((item) => ({ label: item.title, description: '文档', to: '/documents', kind: 'document', id: String(item.id) })),
   ]
-  return items.filter((item) => !query || `${item.label} ${item.description}`.toLocaleLowerCase().includes(query)).slice(0, 12)
+  return items.filter((item) => !query || (item.kind === 'chat' && chat.searchIds?.includes(item.id)) || `${item.label} ${item.description}`.toLocaleLowerCase().includes(query)).slice(0, 12)
 })
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+watch(search, (query) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { void chat.searchSessions(query) }, 250) })
 let statusTimer: number | undefined
 let paletteTrigger: HTMLElement | null = null
 
@@ -118,6 +120,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
   window.clearInterval(statusTimer)
   window.removeEventListener('keydown', onGlobalKeydown)
 })

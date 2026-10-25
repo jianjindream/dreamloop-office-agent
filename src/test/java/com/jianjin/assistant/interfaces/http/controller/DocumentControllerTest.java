@@ -40,7 +40,8 @@ class DocumentControllerTest {
             mock(DocumentParser.class),
             new DocumentLibraryService(new InMemoryLibraryRepo(), mock(RagService.class)),
             new ChatTaskRegistry(),
-            new UploadProgressService()
+            new UploadProgressService(),
+            mock(com.jianjin.assistant.service.document.AttachmentStore.class)
     )).setControllerAdvice(new GlobalApiExceptionHandler())
             .setMessageConverters(new MappingJackson2HttpMessageConverter()).build();
 
