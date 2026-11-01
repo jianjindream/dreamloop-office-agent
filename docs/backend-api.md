@@ -56,6 +56,19 @@
 
 上传及保存返回 `document_saved: true` 和 `index_status`（`not_indexed`、`indexed`、`failed`）。索引失败仍保留正文并返回 `index_error`；不能只依据“上传进度 100%”判断检索已可用。索引状态记录在具体版本元数据中。
 
+上传解析支持 DOCX、XLSX、PDF、Markdown 和 TXT。DOCX 返回段落/表格定位，XLSX 返回工作表/行定位并读取公式求值结果；原始文件仍通过附件接口下载。
+
+## 项目周报与导出
+
+- `GET /weekly-report/templates`：列出内置模板和当前工作区的公司模板。
+- `POST /weekly-report/templates`：创建公司模板，请求体包含 `name`、`description` 和 `content_md`。
+- `POST /weekly-report/generate`：生成并保存周报草稿。项目、周期、模板和 `document_ids` 必填，资料最多 20 份。
+- `POST /weekly-report/compare`：比较生成稿和修改稿，返回逐行新增、删除和未变统计。
+- `GET /documents/{id}/diff?from_version=...&to_version=...`：比较同一文档的两个不可变版本。
+- `GET /documents/{id}/export?format=docx|pdf&version_id=...`：导出最新版本或指定不可变版本。
+
+周报生成响应包含 `review.conflicts`、`review.missing` 和 `review.calculations`。每项确定性计算均包含输入、公式、结果、单位和来源；资料冲突保留所有值，不由服务端擅自裁决。
+
 ## MCP 工具
 
 - `POST /tools/mcp`：注册。

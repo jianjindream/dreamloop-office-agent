@@ -1,6 +1,19 @@
 package com.jianjin.assistant.service.document;
 
 import com.jianjin.assistant.domain.document.ParseResult;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.DataFormatter;
+import org.apache.poi.ss.usermodel.FormulaEvaluator;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
+import org.apache.poi.xwpf.usermodel.IBodyElement;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFParagraph;
+import org.apache.poi.xwpf.usermodel.XWPFTable;
+import org.apache.poi.xwpf.usermodel.XWPFTableCell;
+import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.slf4j.Logger;
@@ -36,11 +49,117 @@ public class DocumentParser {
         if ("application/pdf".equals(mediaType) || ".pdf".equals(ext)) {
             return parsePDF(filename, mediaType, data);
         }
+        if ("application/vnd.openxmlformats-officedocument.wordprocessingml.document".equals(mediaType)
+                || ".docx".equals(ext)) {
+            return parseDocx(filename, mediaType, data);
+        }
+        if ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".equals(mediaType)
+                || ".xlsx".equals(ext)) {
+            return parseXlsx(filename, mediaType, data);
+        }
         String text = normalizeText(new String(data, StandardCharsets.UTF_8));
         if (text.isBlank()) {
             throw new IllegalArgumentException("uploaded document is empty");
         }
         return new ParseResult(filename, mediaType, "plain_text", text, 0, runeLen(text), false);
+    }
+
+    private ParseResult parseDocx(String filename, String contentType, byte[] data) {
+        try (XWPFDocument document = new XWPFDocument(new ByteArrayInputStream(data))) {
+            StringBuilder output = new StringBuilder();
+            int paragraph = 0;
+            int table = 0;
+            for (IBodyElement element : document.getBodyElements()) {
+                if (element instanceof XWPFParagraph value) {
+                    String text = normalizeText(value.getText());
+                    if (text.isBlank()) continue;
+                    paragraph++;
+                    appendBlock(output, "[paragraph " + paragraph + "]\n" + text);
+                } else if (element instanceof XWPFTable value) {
+                    table++;
+                    appendBlock(output, "[table " + table + "]\n" + wordTable(value));
+                }
+            }
+            String text = output.toString().trim();
+            if (text.isBlank()) throw new IllegalArgumentException("uploaded document is empty");
+            return new ParseResult(filename, contentType, "apache-poi-docx", text, 0, runeLen(text), false);
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("parse docx failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static String wordTable(XWPFTable table) {
+        List<List<String>> rows = new ArrayList<>();
+        int width = 0;
+        for (XWPFTableRow row : table.getRows()) {
+            List<String> cells = new ArrayList<>();
+            for (XWPFTableCell cell : row.getTableCells()) cells.add(markdownCell(normalizeText(cell.getText())));
+            width = Math.max(width, cells.size());
+            rows.add(cells);
+        }
+        if (rows.isEmpty() || width == 0) return "";
+        StringBuilder output = new StringBuilder();
+        appendMarkdownRow(output, rows.get(0), width);
+        List<String> divider = new ArrayList<>();
+        for (int i = 0; i < width; i++) divider.add("---");
+        appendMarkdownRow(output, divider, width);
+        for (int i = 1; i < rows.size(); i++) appendMarkdownRow(output, rows.get(i), width);
+        return output.toString().trim();
+    }
+
+    private ParseResult parseXlsx(String filename, String contentType, byte[] data) {
+        try (Workbook workbook = WorkbookFactory.create(new ByteArrayInputStream(data))) {
+            DataFormatter formatter = new DataFormatter(Locale.ROOT, true);
+            FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+            StringBuilder output = new StringBuilder();
+            for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
+                Sheet sheet = workbook.getSheetAt(sheetIndex);
+                appendBlock(output, "## Sheet: " + sheet.getSheetName());
+                int first = Math.max(0, sheet.getFirstRowNum());
+                int last = sheet.getLastRowNum();
+                int width = 0;
+                for (int rowIndex = first; rowIndex <= last; rowIndex++) {
+                    Row row = sheet.getRow(rowIndex);
+                    if (row != null) width = Math.max(width, row.getLastCellNum());
+                }
+                if (width <= 0) continue;
+                for (int rowIndex = first; rowIndex <= last; rowIndex++) {
+                    Row row = sheet.getRow(rowIndex);
+                    List<String> values = new ArrayList<>();
+                    for (int column = 0; column < width; column++) {
+                        Cell cell = row == null ? null : row.getCell(column, Row.MissingCellPolicy.RETURN_BLANK_AS_NULL);
+                        String value = cell == null ? "" : formatter.formatCellValue(cell, evaluator);
+                        values.add(markdownCell(value));
+                    }
+                    output.append("[row ").append(rowIndex + 1).append("] ");
+                    appendMarkdownRow(output, values, width);
+                }
+            }
+            String text = output.toString().trim();
+            if (text.isBlank()) throw new IllegalArgumentException("uploaded workbook is empty");
+            return new ParseResult(filename, contentType, "apache-poi-xlsx", text, workbook.getNumberOfSheets(), runeLen(text), false);
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("parse xlsx failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static void appendBlock(StringBuilder output, String value) {
+        if (output.length() > 0) output.append("\n\n");
+        output.append(value);
+    }
+
+    private static String markdownCell(String value) {
+        return value == null ? "" : value.replace("|", "\\|").replace("\n", "<br>").trim();
+    }
+
+    private static void appendMarkdownRow(StringBuilder output, List<String> cells, int width) {
+        output.append('|');
+        for (int i = 0; i < width; i++) output.append(' ').append(i < cells.size() ? cells.get(i) : "").append(" |");
+        output.append('\n');
     }
 
     // ─────────────────────────── PDF 解析 ───────────────────────────

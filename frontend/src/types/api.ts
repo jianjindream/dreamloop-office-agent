@@ -77,6 +77,52 @@ export interface UploadResult {
   error?: string
 }
 
+export interface WeeklyReportTemplate {
+  id: string
+  name: string
+  description: string
+  builtIn: boolean
+  contentMd: string
+}
+
+export interface WeeklyReportIssue {
+  type: 'conflict' | 'missing'
+  field: string
+  message: string
+  sourceIds: string[]
+  values: Record<string, string>
+}
+
+export interface WeeklyReportCalculation {
+  metric: string
+  inputs: number[]
+  formula: string
+  result: number | null
+  unit: string
+  sourceId: string
+}
+
+export interface WeeklyReportResult {
+  documentId: string
+  versionId: string
+  version: number
+  contentMd: string
+  review: {
+    conflicts: WeeklyReportIssue[]
+    missing: WeeklyReportIssue[]
+    calculations: WeeklyReportCalculation[]
+  }
+  sources: Array<{ sourceId: string; documentId: string; versionId: string; version: number; title: string; locator: string }>
+  indexStatus: string
+}
+
+export interface ReviewDiff {
+  added: number
+  removed: number
+  unchanged: number
+  changes: Array<{ type: 'added' | 'removed' | 'unchanged'; originalLine: number; revisedLine: number; text: string }>
+}
+
 export interface McpRegistration {
   name: string
   description: string

@@ -17,6 +17,9 @@ import type {
   UploadResult,
   ServerSession,
   ServerMessage,
+  WeeklyReportTemplate,
+  WeeklyReportResult,
+  ReviewDiff,
 } from '@/types/api'
 
 interface StreamOptions {
@@ -105,6 +108,32 @@ export const agentApi = {
   downloadOriginal: async (id: string | number) => {
     const response = await fetch(`${API_BASE_URL}/api/documents/${encodeURIComponent(id)}/original`, { headers: identityHeaders })
     if (!response.ok) throw new ApiError('原始附件下载失败', response.status)
+    return response.blob()
+  },
+  weeklyReportTemplates: () => request<WeeklyReportTemplate[]>('/api/weekly-report/templates'),
+  createWeeklyReportTemplate: (payload: { name: string; description?: string; content_md: string }) =>
+    request<WeeklyReportTemplate>('/api/weekly-report/templates', { method: 'POST', body: JSON.stringify(payload) }),
+  generateWeeklyReport: (payload: {
+    project_name: string
+    period_start: string
+    period_end: string
+    template_id: string
+    document_ids: string[]
+    user_facts?: string
+    save_draft?: boolean
+  }) => request<WeeklyReportResult>('/api/weekly-report/generate', { method: 'POST', body: JSON.stringify(payload) }),
+  compareWeeklyReport: (originalContent: string, revisedContent: string) =>
+    request<ReviewDiff>('/api/weekly-report/compare', {
+      method: 'POST', body: JSON.stringify({ original_content: originalContent, revised_content: revisedContent }),
+    }),
+  exportDocument: async (id: string, format: 'docx' | 'pdf', versionId?: string) => {
+    const query = new URLSearchParams({ format })
+    if (versionId) query.set('version_id', versionId)
+    const response = await fetch(`${API_BASE_URL}/api/documents/${encodeURIComponent(id)}/export?${query}`, { headers: identityHeaders })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null)
+      throw new ApiError(payload?.error || '导出失败', response.status, payload)
+    }
     return response.blob()
   },
   sessions: (query = '') => request<ServerSession[]>(query ? `/api/sessions?q=${encodeURIComponent(query)}` : '/api/sessions'),

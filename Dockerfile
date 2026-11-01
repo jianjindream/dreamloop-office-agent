@@ -17,7 +17,7 @@ RUN mvn -B -q -DskipTests package
 
 # 运行时镜像（轻量 JRE 21）
 FROM eclipse-temurin:21-jre-jammy
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata curl fonts-noto-cjk \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*

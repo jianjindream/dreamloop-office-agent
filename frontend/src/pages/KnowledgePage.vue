@@ -156,10 +156,10 @@ onMounted(() => { loadMeta(); void loadDocuments() })
       <article class="surface-card stat-card"><span class="stat-icon" :class="processingCount ? 'amber' : 'green'"><LoaderCircle v-if="processingCount" :size="19" class="spin" /><CheckCircle2 v-else :size="19" /></span><div><small>处理队列</small><strong>{{ processingCount ? `${processingCount} 项` : '空闲' }}</strong><em>上传后自动建立索引</em></div></article>
     </section>
 
-    <input ref="fileInput" class="sr-only" type="file" multiple accept=".pdf,.txt,.md,text/plain,text/markdown,application/pdf" @change="acceptFiles(($event.target as HTMLInputElement).files || [])" />
+    <input ref="fileInput" class="sr-only" type="file" multiple accept=".pdf,.txt,.md,.docx,.xlsx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="acceptFiles(($event.target as HTMLInputElement).files || [])" />
     <section class="upload-card" :class="{ active: dragActive }" @dragenter.prevent="dragActive = true" @dragover.prevent="dragActive = true" @dragleave.prevent="dragActive = false" @drop.prevent="onDrop" @click="fileInput?.click()">
       <span class="upload-icon"><UploadCloud :size="24" /></span>
-      <div><strong>{{ dragActive ? '松开即可上传' : '把资料拖到这里，或点击选择文件' }}</strong><p>当前解析器支持 PDF、Markdown 和 TXT；扫描版 PDF 会提示需要 OCR。</p></div>
+      <div><strong>{{ dragActive ? '松开即可上传' : '把资料拖到这里，或点击选择文件' }}</strong><p>支持 DOCX、XLSX、PDF、Markdown 和 TXT；扫描版 PDF 会提示需要 OCR。</p></div>
       <span class="upload-action">选择文件</span>
     </section>
 

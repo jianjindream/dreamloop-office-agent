@@ -28,6 +28,12 @@ const router = createRouter({
           meta: { title: '文档', eyebrow: 'AI Documents' },
         },
         {
+          path: 'weekly-report',
+          name: 'weekly-report',
+          component: () => import('@/pages/WeeklyReportPage.vue'),
+          meta: { title: '项目周报', eyebrow: 'Office Workflow' },
+        },
+        {
           path: 'tools',
           name: 'tools',
           component: () => import('@/pages/ToolsPage.vue'),
