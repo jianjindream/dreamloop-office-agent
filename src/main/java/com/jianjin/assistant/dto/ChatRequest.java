@@ -2,6 +2,7 @@ package com.jianjin.assistant.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
+import java.util.Set;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 
 public class ChatRequest {
@@ -15,8 +16,14 @@ public class ChatRequest {
     private String userId;
     @JsonProperty("session_id")
     private String sessionId;
+    @JsonProperty("knowledge_scope")
+    private String knowledgeScope;
+    @JsonProperty("document_ids")
+    private List<String> documentIds;
     @JsonIgnore
     private List<String> allowedToolKeys;
+    @JsonIgnore
+    private Set<String> allowedDocHashes;
     @JsonIgnore
     private String requestId;
 
@@ -32,8 +39,14 @@ public class ChatRequest {
     public void setUserId(String userId) { this.userId = userId; }
     public String getSessionId() { return sessionId; }
     public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    public String getKnowledgeScope() { return knowledgeScope; }
+    public void setKnowledgeScope(String knowledgeScope) { this.knowledgeScope = knowledgeScope; }
+    public List<String> getDocumentIds() { return documentIds; }
+    public void setDocumentIds(List<String> documentIds) { this.documentIds = documentIds; }
     public List<String> getAllowedToolKeys() { return allowedToolKeys; }
     public void setAllowedToolKeys(List<String> allowedToolKeys) { this.allowedToolKeys = allowedToolKeys; }
+    public Set<String> getAllowedDocHashes() { return allowedDocHashes; }
+    public void setAllowedDocHashes(Set<String> allowedDocHashes) { this.allowedDocHashes = allowedDocHashes; }
     public String getRequestId() { return requestId; }
     public void setRequestId(String requestId) { this.requestId = requestId; }
 }

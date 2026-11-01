@@ -275,7 +275,8 @@ public class HybridStore {
             SearchResult current = parentResults.get(context.contextId);
             if (current == null) {
                 parentResults.put(context.contextId, new SearchResult(
-                        context.contextId, new Chunk(0, context.content), hit.score, source, hit.sourceMask));
+                        context.contextId, new Chunk(0, context.content), hit.score, source, hit.sourceMask,
+                        context.docHash, context.parentIdx));
             } else {
                 current.sourceMask |= hit.sourceMask;
                 current.sourceSupportCount = Integer.bitCount(current.sourceMask);
@@ -339,15 +340,24 @@ public class HybridStore {
         public double score;
         public String source;
         public int sourceSupportCount;
+        public String docHash;
+        public int parentIdx;
         private int sourceMask;
 
         public SearchResult(long contextId, Chunk chunk, double score, String source, int sourceMask) {
+            this(contextId, chunk, score, source, sourceMask, null, -1);
+        }
+
+        public SearchResult(long contextId, Chunk chunk, double score, String source, int sourceMask,
+                            String docHash, int parentIdx) {
             this.contextId = contextId;
             this.chunk = chunk;
             this.score = score;
             this.source = source;
             this.sourceMask = sourceMask;
             this.sourceSupportCount = Integer.bitCount(sourceMask);
+            this.docHash = docHash;
+            this.parentIdx = parentIdx;
         }
     }
 

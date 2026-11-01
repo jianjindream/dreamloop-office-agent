@@ -17,6 +17,7 @@ public class ChatHistoryRepository {
         public String role;
         public String content;
         public String createdAt;
+        public String metadata;
     }
     public static class SessionRow {
         public String sessionId;
@@ -28,11 +29,15 @@ public class ChatHistoryRepository {
     public record ImportedMessage(String role, String content, long createdAt) {}
 
     public long save(String owner, String session, String role, String content) {
+        return save(owner, session, role, content, "{}");
+    }
+    public long save(String owner, String session, String role, String content, String metadata) {
         validateMessage(role,content);
         return retryInsert(() -> database.transaction(c -> {
             ensureSession(c,owner,session,"user".equals(role) ? deriveTitle(content) : "新对话",Instant.now());
-            try (PreparedStatement ps=c.prepareStatement("INSERT INTO chat_history(user_id,session_id,role,content) VALUES(?,?,?,?)",Statement.RETURN_GENERATED_KEYS)) {
-                ps.setString(1,owner); ps.setString(2,session); ps.setString(3,role); ps.setString(4,content); ps.executeUpdate();
+            try (PreparedStatement ps=c.prepareStatement("INSERT INTO chat_history(user_id,session_id,role,content,metadata) VALUES(?,?,?,?,?)",Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1,owner); ps.setString(2,session); ps.setString(3,role); ps.setString(4,content);
+                ps.setString(5,metadata==null ? "{}" : metadata); ps.executeUpdate();
                 try(ResultSet rs=ps.getGeneratedKeys()) { if(rs.next()) return rs.getLong(1); }
                 throw new SQLException("未返回消息 ID");
             }
@@ -50,11 +55,12 @@ public class ChatHistoryRepository {
     private List<Row> query(String owner,String session,long afterId,int limit,boolean forward) {
         return database.transaction(c -> {
             List<Row> result=new ArrayList<>();
-            try(PreparedStatement ps=c.prepareStatement("SELECT id,role,content,created_at FROM chat_history WHERE user_id=? AND session_id=? AND id>? ORDER BY id " + (forward ? "ASC" : "DESC") + " LIMIT ?")) {
+            try(PreparedStatement ps=c.prepareStatement("SELECT id,role,content,created_at,metadata FROM chat_history WHERE user_id=? AND session_id=? AND id>? ORDER BY id " + (forward ? "ASC" : "DESC") + " LIMIT ?")) {
                 ps.setString(1,owner); ps.setString(2,session); ps.setLong(3,Math.max(0,afterId)); ps.setInt(4,Math.max(1,Math.min(10000,limit)));
                 try(ResultSet rs=ps.executeQuery()) { while(rs.next()) {
                     Row row=new Row(); row.id=rs.getLong(1); row.role=rs.getString(2); row.content=rs.getString(3);
                     row.createdAt=rs.getTimestamp(4).toInstant().toString(); result.add(row);
+                    row.metadata=rs.getString(5);
                 }}
             }
             return result;
@@ -124,12 +130,12 @@ public class ChatHistoryRepository {
             Instant created=createdAt>0 ? Instant.ofEpochMilli(createdAt) : Instant.now();
             ensureSession(c,owner,session,title==null || title.isBlank() ? deriveTitle(messages.get(0).content()) : title.substring(0,Math.min(200,title.length())),created);
             Instant updated=created;
-            try(PreparedStatement ps=c.prepareStatement("INSERT INTO chat_history(user_id,session_id,role,content,created_at) VALUES(?,?,?,?,?)")) {
+            try(PreparedStatement ps=c.prepareStatement("INSERT INTO chat_history(user_id,session_id,role,content,created_at,metadata) VALUES(?,?,?,?,?,?)")) {
                 for(ImportedMessage message:messages) {
                     Instant time=message.createdAt()>0 ? Instant.ofEpochMilli(message.createdAt()) : created;
                     if(time.isAfter(updated)) updated=time;
                     ps.setString(1,owner); ps.setString(2,session); ps.setString(3,message.role()); ps.setString(4,message.content());
-                    ps.setObject(5,time.atOffset(ZoneOffset.UTC)); ps.addBatch();
+                    ps.setObject(5,time.atOffset(ZoneOffset.UTC)); ps.setString(6,"{}"); ps.addBatch();
                 }
                 ps.executeBatch();
             }

@@ -83,3 +83,35 @@ test('skip link and search dialog are keyboard accessible', async ({ page }) => 
   await expect(page.getByRole('dialog', { name: '全局搜索' })).toBeHidden()
   await expect(searchButton).toBeFocused()
 })
+
+test('uploaded attachment is bound to one question and renders a versioned citation', async ({ page }) => {
+  let chatPayload: Record<string, unknown> | undefined
+  const source = {
+    chunk: { content: '本周完成登录回归，完成率 75%。' }, similarity: 0.94, context_id: 31,
+    document_id: 'doc-weekly', version_id: 'ver-2', document_title: '项目周报', version: 2,
+    locator: '原文片段 3', excerpt: '本周完成登录回归，完成率 75%。', retrieval_source: 'hybrid',
+  }
+  await page.route('**/api/upload/file', (route) => route.fulfill({ json: {
+    document_saved: true, index_status: 'indexed', document_id: 'doc-weekly', version_id: 'ver-2', filename: 'weekly.md',
+  } }))
+  await page.route('**/api/chat/stream', async (route) => {
+    chatPayload = route.request().postDataJSON() as Record<string, unknown>
+    const body = [
+      `event: intent\ndata: ${JSON.stringify({ intent: 'summarize', knowledge_scope: 'selected', document_ids: ['doc-weekly'] })}\n\n`,
+      `event: mode\ndata: ${JSON.stringify({ mode: 'rag' })}\n\n`,
+      `event: rag_result\ndata: ${JSON.stringify({ chunks: [source] })}\n\n`,
+      `event: done\ndata: ${JSON.stringify({ answer: '完成率为 75% [S1]', mode: 'rag', intent: 'summarize', search_results: [source] })}\n\n`,
+    ].join('')
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body })
+  })
+  await page.goto('/chat')
+  await page.locator('input[type="file"]').setInputFiles({ name: 'weekly.md', mimeType: 'text/markdown', buffer: Buffer.from('# 周报\n完成率 75%') })
+  await expect(page.getByText('weekly.md')).toBeVisible()
+  await page.getByRole('textbox', { name: '向 DreamLoop 提问' }).fill('总结附件')
+  await page.getByRole('button', { name: '发送消息' }).click()
+  await expect(page.getByText('完成率为 75% [S1]')).toBeVisible()
+  await expect(page.getByText('项目周报v2')).toBeVisible()
+  await expect(page.getByText(/原文片段 3/)).toBeVisible()
+  expect(chatPayload).toMatchObject({ knowledge_scope: 'selected', document_ids: ['doc-weekly'], message: '总结附件' })
+  await expect(page.getByText('weekly.md')).toBeHidden()
+})

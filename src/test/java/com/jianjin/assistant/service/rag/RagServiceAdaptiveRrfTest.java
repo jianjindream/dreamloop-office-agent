@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -167,6 +168,29 @@ class RagServiceAdaptiveRrfTest {
         } finally {
             service.close();
         }
+    }
+
+    @Test
+    void selectedScopeAndStableSourceLocatorReachGeneration() {
+        AppConfig cfg = new AppConfig();
+        HybridStore store = mock(HybridStore.class);
+        when(store.getMode()).thenReturn("hybrid");
+        when(store.search("总结", 12, Set.of("hash-a"))).thenReturn(List.of(
+                new HybridStore.SearchResult(81L, new Chunk(0,"完成率为 75%"),0.2,"hybrid",3,"hash-a",4)));
+        AtomicReference<String> system = new AtomicReference<>();
+        AtomicReference<String> user = new AtomicReference<>();
+        RagService service = new RagService(cfg,store,mock(TextSplitter.class),mock(InfrastructureService.class));
+        service.setGenerateFn((sp,um) -> { system.set(sp); user.set(um); return "完成率为 75% [S1]"; });
+        service.restoreChunks(List.of(new Chunk(1,"loaded")));
+        try {
+            RagService.QueryResult output=service.queryWithHistory("workspace:user","总结",List.of(),"",
+                    Set.of("hash-a"),"summarize");
+            assertEquals("hash-a",output.results.get(0).docHash);
+            assertEquals(4,output.results.get(0).parentIdx);
+            assertTrue(system.get().contains("每项事实、数字和结论"));
+            assertTrue(user.get().contains("[S1 | 原文片段 5]"));
+            verify(store).search("总结",12,Set.of("hash-a"));
+        } finally { service.close(); }
     }
 
     private static HybridStore.SearchResult result(long contextId, String content) {

@@ -46,6 +46,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -517,7 +518,11 @@ public class AgentController {
         int safeLimit = Math.max(1, Math.min(500, limit));
         List<Map<String, Object>> out = new ArrayList<>();
         for (var row : infra.pageChatMessages(RequestIdentityHolder.current().ownerKey(), sessionId, afterId, safeLimit)) {
-            out.add(Map.of("id", row.id, "role", row.role, "content", row.content, "created_at", row.createdAt));
+            Map<String,Object> item = new LinkedHashMap<>();
+            item.put("id", row.id); item.put("role", row.role); item.put("content", row.content); item.put("created_at", row.createdAt);
+            try { item.put("metadata", SSE_MAPPER.readValue(row.metadata == null ? "{}" : row.metadata, Map.class)); }
+            catch (Exception ignored) { item.put("metadata", Map.of()); }
+            out.add(item);
         }
         return out;
     }
@@ -605,6 +610,7 @@ public class AgentController {
             throw new ApiException("INVALID_SESSION_ID", "session_id 格式不正确", HttpStatus.BAD_REQUEST);
         }
         req.setSessionId(sessionId);
+        prepareKnowledgeScope(req);
         if (req.getSelectedTools() != null) {
             req.setSelectedTools(req.getSelectedTools().stream().map(name ->
                     agent.getTools().containsKey(mcpKey(name)) ? mcpKey(name) : name).toList());
@@ -613,6 +619,51 @@ public class AgentController {
         req.setAllowedToolKeys(agent.getTools().entrySet().stream()
                 .filter(entry -> !entry.getValue().isMcp() || entry.getKey().startsWith(prefix))
                 .map(Map.Entry::getKey).toList());
+    }
+
+    private void prepareKnowledgeScope(ChatRequest req) {
+        LinkedHashSet<String> documentIds = new LinkedHashSet<>();
+        if (req.getDocumentIds() != null) {
+            for (String id : req.getDocumentIds()) {
+                if (id != null && !id.isBlank()) {
+                    String normalized = id.trim();
+                    if (!normalized.matches("[A-Za-z0-9_-]{1,80}")) {
+                        throw new ApiException("INVALID_DOCUMENT_ID", "文档 ID 格式不正确", HttpStatus.BAD_REQUEST);
+                    }
+                    documentIds.add(normalized);
+                }
+            }
+        }
+        if (documentIds.size() > 20) {
+            throw new ApiException("TOO_MANY_DOCUMENTS", "一次最多选择 20 份资料", HttpStatus.BAD_REQUEST);
+        }
+        String requested = req.getKnowledgeScope() == null ? "" : req.getKnowledgeScope().trim().toLowerCase();
+        if (!documentIds.isEmpty()) requested = "selected";
+        if (requested.isBlank()) requested = req.isUseRag() ? "workspace" : "none";
+        if (!List.of("none", "workspace", "selected").contains(requested)) {
+            throw new ApiException("INVALID_KNOWLEDGE_SCOPE", "knowledge_scope 必须为 none、workspace 或 selected", HttpStatus.BAD_REQUEST);
+        }
+        if ("selected".equals(requested) && documentIds.isEmpty()) {
+            throw new ApiException("DOCUMENT_SCOPE_EMPTY", "精确资料范围至少需要一份文档", HttpStatus.BAD_REQUEST);
+        }
+
+        LinkedHashSet<String> hashes = new LinkedHashSet<>();
+        if ("selected".equals(requested)) {
+            for (String documentId : documentIds) {
+                LibraryRepo.DocumentWithVersion selected = ownedDocument(documentId);
+                Object hash = selected.version.getMetadata().get("doc_hash");
+                Object status = selected.version.getMetadata().get("index_status");
+                if (hash == null || !"indexed".equals(String.valueOf(status))) {
+                    throw new ApiException("DOCUMENT_NOT_INDEXED",
+                            "资料「" + selected.document.getTitle() + "」尚未建立可用索引，请先重试索引", HttpStatus.CONFLICT);
+                }
+                hashes.add(String.valueOf(hash));
+            }
+        }
+        req.setKnowledgeScope(requested);
+        req.setDocumentIds(List.copyOf(documentIds));
+        req.setAllowedDocHashes("selected".equals(requested) ? hashes : null);
+        req.setUseRag(!"none".equals(requested));
     }
 
     @SuppressWarnings("unchecked")

@@ -62,6 +62,8 @@ npm audit --registry=https://registry.npmjs.org --audit-level=moderate
 - Markdown 内容经过 DOMPurify 清洗后渲染
 - 常用语言使用 Shiki 高亮，并支持复制代码
 - 工具调用、执行步骤和知识库引用可视化
+- 右侧资料面板可限定整个工作区或精确文档范围；上传附件只绑定到下一次提问
+- 引用卡片展示文档、版本、原文片段和摘录，并可打开回答使用的历史版本
 - PDF、Markdown、TXT 通过 multipart 接口上传
 
 ## 工作区管理能力

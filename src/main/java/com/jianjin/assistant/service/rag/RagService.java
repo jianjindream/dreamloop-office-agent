@@ -32,7 +32,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.BiFunction;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 @Service
 public class RagService {
@@ -112,9 +111,14 @@ public class RagService {
     }
 
     public Map.Entry<Integer, String> ingest(String ownerKey, String doc) {
+        return ingest(ownerKey, "", doc);
+    }
+
+    /** Indexes one immutable source version; sourceKey prevents equal-content documents from sharing an index identity. */
+    public Map.Entry<Integer, String> ingest(String ownerKey, String sourceKey, String doc) {
         List<TextSplitter.ParentChunk> parents = splitter.splitParentChild(doc);
         // Include the owner in the hash input so identical files in two workspaces never share ownership.
-        HybridStore.IndexResult indexed = store.index(parents, ownerKey + "\n" + doc);
+        HybridStore.IndexResult indexed = store.index(parents, ownerKey + "\n" + sourceKey + "\n" + doc);
         if (indexed.childRefs.isEmpty()) {
             throw new IllegalStateException("document produced no persistent RAG chunks");
         }
@@ -183,7 +187,14 @@ public class RagService {
 
     public QueryResult queryWithHistory(String ownerKey, String question, List<HistoryMessage> history,
                                         String systemPrefix) {
-        QueryTrace trace = traceQueryWithHistory(ownerKey, question, history, systemPrefix);
+        QueryTrace trace = traceQueryWithHistory(ownerKey, question, history, systemPrefix, null, "qa");
+        return new QueryResult(trace.answer, trace.finalContexts);
+    }
+
+    public QueryResult queryWithHistory(String ownerKey, String question, List<HistoryMessage> history,
+                                        String systemPrefix, Set<String> selectedDocHashes, String officeIntent) {
+        QueryTrace trace = traceQueryWithHistory(ownerKey, question, history, systemPrefix,
+                selectedDocHashes, officeIntent);
         return new QueryResult(trace.answer, trace.finalContexts);
     }
 
@@ -205,6 +216,12 @@ public class RagService {
 
     private QueryTrace traceQueryWithHistory(String ownerKey, String question, List<HistoryMessage> history,
                                              String systemPrefix) {
+        return traceQueryWithHistory(ownerKey, question, history, systemPrefix, null, "qa");
+    }
+
+    private QueryTrace traceQueryWithHistory(String ownerKey, String question, List<HistoryMessage> history,
+                                             String systemPrefix, Set<String> selectedDocHashes,
+                                             String officeIntent) {
         QueryTrace trace = new QueryTrace();
         trace.originalQuestion = question;
         trace.mode = store.getMode();
@@ -220,8 +237,12 @@ public class RagService {
                 : rewriter.rewritePrimary(question, safeHistory);
         if (primary.text().isBlank()) primary = new QuerySpec(question, QueryType.PRIMARY);
         trace.primaryQuery = primary.text();
-        Set<String> allowedDocHashes = ownerKey == null || tenantRepository == null
+        Set<String> ownerHashes = ownerKey == null || tenantRepository == null
                 ? null : tenantRepository.documentHashes(ownerKey);
+        Set<String> allowedDocHashes = selectedDocHashes == null
+                ? (ownerHashes == null ? null : new LinkedHashSet<>(ownerHashes))
+                : new LinkedHashSet<>(selectedDocHashes);
+        if (allowedDocHashes != null && ownerHashes != null) allowedDocHashes.retainAll(ownerHashes);
 
         // Keep a bounded parent candidate pool for source RRF, query RRF and optional reranking.
         // HybridStore retrieves four child chunks per requested parent, so the default is 48 -> 12 -> 3.
@@ -261,20 +282,27 @@ public class RagService {
         trace.rerankedContexts = copy(results);
         trace.finalContexts = copy(results);
 
-        String context = results.stream()
-                .map(r -> r.chunk.getContent())
-                .collect(Collectors.joining("\n\n"));
+        StringBuilder contextBuilder = new StringBuilder();
+        for (int i = 0; i < results.size(); i++) {
+            ScoredChunk result = results.get(i);
+            contextBuilder.append("[S").append(i + 1).append(" | 原文片段 ")
+                    .append(Math.max(0, result.parentIdx) + 1).append("]\n")
+                    .append(result.chunk.getContent()).append("\n\n");
+        }
+        String context = contextBuilder.toString().trim();
 
         String answer;
         if (generateFn != null) {
-            String systemPrompt = "你是一个基于知识库回答问题的助手。请仅根据提供的上下文内容回答问题，不要编造信息。如果上下文不足以回答，请说明。";
+            String systemPrompt = officeInstruction(officeIntent)
+                    + "\n请仅根据提供的上下文内容回答问题，不要编造。每项事实、数字和结论都要在句末使用 [S1] 这类来源编号；"
+                    + "资料不足、缺项或冲突时必须明确指出，不能自行补齐或裁决。";
             if (systemPrefix != null && !systemPrefix.isBlank()) {
                 systemPrompt = systemPrefix + "\n\n" + systemPrompt;
             }
             String userMsg = String.format("上下文：\n%s\n\n问题：%s", context, primary.text());
             answer = generateFn.apply(systemPrompt, userMsg);
         } else {
-            answer = "【知识库检索结果】\n" + context;
+            answer = "【资料检索结果】\n" + context;
         }
         trace.answer = answer;
         trace.mode = store.getMode();
@@ -366,7 +394,8 @@ public class RagService {
                 HybridStore.SearchResult hit = query.hits.get(i);
                 if (hit == null || hit.chunk == null) continue;
                 FusedContext context = rrf.computeIfAbsent(hit.contextId,
-                        ignored -> new FusedContext(hit.contextId, hit.chunk, "query-rrf", hit.sourceSupportCount));
+                        ignored -> new FusedContext(hit.contextId, hit.chunk, "query-rrf", hit.sourceSupportCount,
+                                hit.docHash, hit.parentIdx));
                 context.score += weight / (k + i + 1);
             }
         }
@@ -378,7 +407,7 @@ public class RagService {
         for (Map.Entry<Long, FusedContext> item : sorted) {
             FusedContext context = item.getValue();
             out.add(new ScoredChunk(context.contextId, context.chunk, context.score / totalWeight,
-                    context.source, context.sourceSupportCount, false));
+                    context.source, context.sourceSupportCount, false, context.docHash, context.parentIdx));
             if (out.size() == topK) break;
         }
         return out;
@@ -398,7 +427,8 @@ public class RagService {
         List<ScoredChunk> out = new ArrayList<>();
         if (hits == null) return out;
         for (HybridStore.SearchResult r : hits) {
-            out.add(new ScoredChunk(r.contextId, r.chunk, r.score, r.source, r.sourceSupportCount, false));
+            out.add(new ScoredChunk(r.contextId, r.chunk, r.score, r.source, r.sourceSupportCount, false,
+                    r.docHash, r.parentIdx));
         }
         return out;
     }
@@ -410,13 +440,18 @@ public class RagService {
         private final Chunk chunk;
         private final String source;
         private final int sourceSupportCount;
+        private final String docHash;
+        private final int parentIdx;
         private double score;
 
-        private FusedContext(long contextId, Chunk chunk, String source, int sourceSupportCount) {
+        private FusedContext(long contextId, Chunk chunk, String source, int sourceSupportCount,
+                             String docHash, int parentIdx) {
             this.contextId = contextId;
             this.chunk = chunk;
             this.source = source;
             this.sourceSupportCount = sourceSupportCount;
+            this.docHash = docHash;
+            this.parentIdx = parentIdx;
         }
     }
 
@@ -497,7 +532,7 @@ public class RagService {
             ScoredChunk current = parents.get(row.contextId);
             if (current == null || child.score > current.score) {
                 parents.put(row.contextId, new ScoredChunk(row.contextId, new Chunk(0, row.content), child.score,
-                        "tf-fallback", 1, true));
+                        "tf-fallback", 1, true, row.docHash, row.parentIdx));
             }
         }
         List<ScoredChunk> contexts = new ArrayList<>(parents.values());
@@ -524,6 +559,8 @@ public class RagService {
         public String source;
         public int sourceSupportCount;
         public boolean fallback;
+        public String docHash;
+        public int parentIdx;
 
         /** Legacy constructor retained for existing callers and tests. */
         public ScoredChunk(Chunk chunk, double score) {
@@ -532,17 +569,36 @@ public class RagService {
 
         public ScoredChunk(long contextId, Chunk chunk, double score, String source,
                            int sourceSupportCount, boolean fallback) {
+            this(contextId, chunk, score, source, sourceSupportCount, fallback, null, -1);
+        }
+
+        public ScoredChunk(long contextId, Chunk chunk, double score, String source,
+                           int sourceSupportCount, boolean fallback, String docHash, int parentIdx) {
             this.contextId = contextId;
             this.chunk = chunk;
             this.score = score;
             this.source = source;
             this.sourceSupportCount = sourceSupportCount;
             this.fallback = fallback;
+            this.docHash = docHash;
+            this.parentIdx = parentIdx;
         }
 
         public ScoredChunk withScore(double newScore) {
-            return new ScoredChunk(contextId, chunk, newScore, source, sourceSupportCount, fallback);
+            return new ScoredChunk(contextId, chunk, newScore, source, sourceSupportCount, fallback, docHash, parentIdx);
         }
+    }
+
+    private static String officeInstruction(String intent) {
+        return switch (intent == null ? "qa" : intent) {
+            case "summarize" -> "你是办公资料总结助手。区分已完成、计划和待确认信息，保留关键数字与责任人。";
+            case "compare" -> "你是办公资料比对助手。逐项列出一致点、差异和冲突，并保留各自来源。";
+            case "extract" -> "你是办公信息提取助手。按用户要求结构化提取字段，缺失值写‘待确认’。";
+            case "rewrite" -> "你是办公文本编辑助手。在不改变事实和数字的前提下改写。";
+            case "draft" -> "你是办公写作助手。依据资料生成结构清晰、可直接编辑的草稿。";
+            case "analyze" -> "你是办公分析助手。区分资料事实、推断和建议，不把推断写成事实。";
+            default -> "你是基于工作区资料回答问题的办公助手。";
+        };
     }
 
     public static class QueryResult {

@@ -404,8 +404,15 @@ public class UnifiedAgentService {
         ChatResponse resp = new ChatResponse();
         resp.setQuery(query);
         resp.setMode("chat");
+        String knowledgeScope = req.getKnowledgeScope() == null
+                ? (req.isUseRag() ? "workspace" : "none") : req.getKnowledgeScope();
+        String officeIntent = ChatRouter.detectOfficeIntent(query);
+        resp.setIntent(officeIntent);
+        resp.setKnowledgeScope(knowledgeScope);
+        resp.setDocumentIds(req.getDocumentIds() == null ? List.of() : req.getDocumentIds());
 
         onEvent.accept(StreamEvent.start(query));
+        onEvent.accept(StreamEvent.intent(officeIntent, knowledgeScope, resp.getDocumentIds()));
 
         sessionMemory.compactBeforeRequest(scope, session, query);
         long userMessageId = infra.saveChatHistory(scope.userId(), scope.sessionId(), "user", query);
@@ -429,7 +436,7 @@ public class UnifiedAgentService {
 
         // 模式决策
         String mode = ChatRouter.decideMode(query, req.isExplicit(), req.isUseRag(),
-                req.getSelectedTools(), rag.isLoaded());
+                req.getSelectedTools(), rag.isLoaded() && !"none".equals(knowledgeScope), "selected".equals(knowledgeScope));
         Map<String, Tool> toolset = req.getAllowedToolKeys() == null ? tools : filterTools(req.getAllowedToolKeys());
         if (req.isExplicit() && req.getSelectedTools() != null && !req.getSelectedTools().isEmpty()) {
             Map<String, Tool> filtered = new java.util.HashMap<>();
@@ -457,9 +464,10 @@ public class UnifiedAgentService {
             case "tool" -> new ToolModeHandler(llm, toolService, pref).run(resp, query, toolset, memPrefix, histMsgs);
             case "rag" -> {
                 RagService.QueryResult qr = rag.queryWithHistory(
-                        scope.userId(), query, toRagHistory(histMsgs, query), memPrefix);
+                        scope.userId(), query, toRagHistory(histMsgs, query), memPrefix,
+                        req.getAllowedDocHashes(), officeIntent);
                 resp.setAnswer(qr.answer);
-                resp.setSearchResults(toSearchResults(qr.results));
+                resp.setSearchResults(toSearchResults(qr.results, scope.userId()));
                 onEvent.accept(StreamEvent.ragResult(resp.getSearchResults()));
             }
             default -> {
@@ -471,7 +479,17 @@ public class UnifiedAgentService {
 
         if (cancelled.get()) resp.setInterrupted(true);
 
-        long answerMessageId = infra.saveChatHistory(scope.userId(), scope.sessionId(), "assistant", resp.getAnswer());
+        String responseMetadata = "{}";
+        try {
+            Map<String, Object> metadata = new LinkedHashMap<>();
+            metadata.put("mode", resp.getMode());
+            metadata.put("intent", resp.getIntent());
+            metadata.put("knowledge_scope", resp.getKnowledgeScope());
+            metadata.put("document_ids", resp.getDocumentIds());
+            metadata.put("search_results", resp.getSearchResults() == null ? List.of() : resp.getSearchResults());
+            responseMetadata = mapper.writeValueAsString(metadata);
+        } catch (Exception ignored) { }
+        long answerMessageId = infra.saveChatHistory(scope.userId(), scope.sessionId(), "assistant", resp.getAnswer(), responseMetadata);
         stm.add(answerMessageId, "assistant", resp.getAnswer(), null);
         sessionMemory.scheduleSoftCompaction(scope, session);
 
@@ -650,11 +668,29 @@ public class UnifiedAgentService {
         log.info("RAG chunks 恢复：{} 条", chunks.size());
     }
 
-    private List<ChatResponse.SearchResultDto> toSearchResults(List<RagService.ScoredChunk> results) {
+    private List<ChatResponse.SearchResultDto> toSearchResults(List<RagService.ScoredChunk> results, String ownerKey) {
         if (results == null) return null;
-        return results.stream()
-                .map(r -> new ChatResponse.SearchResultDto(r.chunk, r.score))
-                .toList();
+        Map<String, com.jianjin.assistant.service.document.DocumentLibraryService.CitationTarget> targets =
+                library.resolveCitations(ownerKey, results.stream().map(result -> result.docHash).toList());
+        List<ChatResponse.SearchResultDto> out = new ArrayList<>();
+        for (RagService.ScoredChunk result : results) {
+            ChatResponse.SearchResultDto dto = new ChatResponse.SearchResultDto(result.chunk, result.score);
+            dto.setContextId(result.contextId);
+            dto.setLocator("原文片段 " + (Math.max(0, result.parentIdx) + 1));
+            String content = result.chunk == null ? "" : result.chunk.getContent();
+            dto.setExcerpt(content == null ? "" : content.substring(0, Math.min(240, content.length())));
+            dto.setRetrievalSource(result.source);
+            dto.setFallback(result.fallback);
+            var target = targets.get(result.docHash);
+            if (target != null) {
+                dto.setDocumentId(target.documentId());
+                dto.setDocumentTitle(target.title());
+                dto.setVersionId(target.versionId());
+                dto.setVersion(target.version());
+            }
+            out.add(dto);
+        }
+        return out;
     }
 
     /** Converts chat messages to rewrite history and excludes the current user query. */

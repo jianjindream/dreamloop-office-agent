@@ -185,7 +185,8 @@ export const useChatStore = defineStore('chat', {
           return {
             id: existing?.id ?? 'server-' + row.id, serverId: row.id, role: row.role, content: row.content,
             createdAt: Date.parse(row.created_at), status: existing?.status === 'streaming' ? 'stopped' : existing?.status ?? 'complete',
-            execution: existing?.execution ?? [], sources: existing?.sources ?? [], mode: existing?.mode,
+            execution: existing?.execution ?? [], sources: existing?.sources?.length ? existing.sources : row.metadata?.search_results ?? [],
+            mode: existing?.mode ?? row.metadata?.mode,
           }
         })
         session.loaded = true

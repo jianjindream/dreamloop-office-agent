@@ -40,7 +40,7 @@ const availableTools = ref<ToolSummary[]>([])
 const selectedTools = ref<string[]>([])
 const toolMenuOpen = ref(false)
 const includeDocument = ref(true)
-const attachment = ref<{ name: string; status: 'uploading' | 'ready' | 'error' } | null>(null)
+const attachment = ref<{ name: string; status: 'uploading' | 'ready' | 'error'; documentId?: string; error?: string } | null>(null)
 
 const messages = computed(() => chat.currentSession?.messages ?? [])
 const hasMessages = computed(() => messages.value.length > 0)
@@ -95,6 +95,12 @@ const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
       const mode = String(data.mode ?? 'chat')
       chat.updateMessage(messageId, { mode })
       chat.addExecution(messageId, { type: 'mode', title: `已选择 ${mode.toUpperCase()} 处理模式`, status: 'success' })
+      break
+    }
+    case 'intent': {
+      const intent = String(data.intent ?? 'qa')
+      const labels: Record<string, string> = { summarize: '资料总结', compare: '资料比对', extract: '信息提取', rewrite: '文本润色', draft: '办公写作', analyze: '资料分析', qa: '资料问答' }
+      chat.addExecution(messageId, { type: 'mode', title: `已识别为${labels[intent] ?? '办公任务'}`, detail: String(data.knowledge_scope ?? 'none') === 'selected' ? '仅使用已选资料' : '使用工作区范围', status: 'success' })
       break
     }
     case 'step':
@@ -154,7 +160,7 @@ const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
 
 const sendMessage = async (content = prompt.value, appendUser = true) => {
   const text = content.trim()
-  if (!text || isStreaming.value || !chat.initialized || chat.historyLoading || chat.currentSession?.loadError) return
+  if (!text || isStreaming.value || (attachment.value && attachment.value.status !== 'ready') || !chat.initialized || chat.historyLoading || chat.currentSession?.loadError) return
   const session = chat.ensureSession()
   chat.activeSessionId = session.id
   if (appendUser) {
@@ -168,9 +174,15 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
   await scrollToBottom()
 
   try {
-    const documentContext = canvas.open && includeDocument.value && canvas.content.trim()
+    const documentContext = canvas.open && includeDocument.value && (!canvas.documentId || canvas.indexStatus !== 'indexed') && canvas.content.trim()
       ? `\n\n[当前关联文档：${canvas.title}]\n${canvas.content.slice(0, 12000)}\n[/当前关联文档]`
       : ''
+    const documentIds = [...new Set([
+      ...(workspace.knowledgeEnabled ? workspace.selectedDocumentIds : []),
+      ...(attachment.value?.status === 'ready' && attachment.value.documentId ? [attachment.value.documentId] : []),
+      ...(canvas.open && includeDocument.value && canvas.documentId && canvas.indexStatus === 'indexed' ? [canvas.documentId] : []),
+    ])]
+    const knowledgeScope = documentIds.length ? 'selected' : workspace.knowledgeEnabled ? 'workspace' : 'none'
     await agentApi.streamChat(
       {
         message: `${text}${documentContext}`,
@@ -179,6 +191,8 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
         explicit: selectedTools.value.length > 0,
         user_id: chat.userId,
         session_id: session.id,
+        knowledge_scope: knowledgeScope,
+        document_ids: documentIds,
       },
       {
         signal: abortController.value.signal,
@@ -192,6 +206,7 @@ const sendMessage = async (content = prompt.value, appendUser = true) => {
         error: latest.content ? undefined : '连接已结束，但服务没有返回最终答案。',
       })
     }
+    attachment.value = null
   } catch (error) {
     if (abortController.value?.signal.aborted) {
       chat.updateMessage(assistant.id, { status: 'stopped' })
@@ -270,6 +285,11 @@ const confirmCommand = async (token: string) => {
   }
 }
 
+const openSource = (source: SearchResult) => {
+  if (source.document_id && source.version_id) void canvas.openDocumentVersion(source.document_id, source.version_id)
+  else if (source.document_id) void canvas.openDocument(source.document_id)
+}
+
 const toggleTool = (toolName: string) => {
   selectedTools.value = selectedTools.value.includes(toolName)
     ? selectedTools.value.filter((name) => name !== toolName)
@@ -290,8 +310,12 @@ const uploadAttachment = async (event: Event) => {
   if (!file) return
   attachment.value = { name: file.name, status: 'uploading' }
   try {
-    await agentApi.uploadFile(file)
-    attachment.value = { name: file.name, status: 'ready' }
+    const result = await agentApi.uploadFile(file)
+    if (!result.document_id || result.index_status !== 'indexed') {
+      attachment.value = { name: file.name, status: 'error', documentId: result.document_id, error: result.index_error || '附件已保存，但索引尚不可用' }
+      return
+    }
+    attachment.value = { name: file.name, status: 'ready', documentId: result.document_id }
     workspace.knowledgeEnabled = true
   } catch {
     attachment.value = { name: file.name, status: 'error' }
@@ -333,13 +357,13 @@ onBeforeUnmount(() => abortController.value?.abort())
     </div>
 
     <section v-else ref="messageList" class="message-list" aria-live="polite">
-      <ChatMessageView v-for="message in messages" :key="message.id" :message="message" @retry="retryMessage" @to-document="toDocument" @confirm-command="confirmCommand" />
+      <ChatMessageView v-for="message in messages" :key="message.id" :message="message" @retry="retryMessage" @to-document="toDocument" @confirm-command="confirmCommand" @open-source="openSource" />
     </section>
 
     <div class="composer-area">
       <button v-if="canvas.open && canvas.content.trim()" class="document-context-chip" :class="{ active: includeDocument }" type="button" @click="includeDocument = !includeDocument"><FileText :size="13" />{{ includeDocument ? '已引用' : '未引用' }}：{{ canvas.title }}<Check v-if="includeDocument" :size="12" /></button>
       <div v-if="attachment" class="attachment-chip" :class="attachment.status">
-        <FileText :size="14" /><span>{{ attachment.name }}</span>
+        <FileText :size="14" /><span>{{ attachment.name }}<small v-if="attachment.error"> · {{ attachment.error }}</small></span>
         <LoaderCircle v-if="attachment.status === 'uploading'" class="spinning" :size="13" />
         <Check v-else-if="attachment.status === 'ready'" :size="13" />
         <CircleAlert v-else :size="13" />
@@ -364,7 +388,7 @@ onBeforeUnmount(() => abortController.value?.abort())
             </div>
           </div>
           <button v-if="isStreaming" class="stop-button" type="button" aria-label="停止生成" @click="stopGeneration"><Square :size="13" fill="currentColor" /></button>
-          <button v-else class="send-button" :disabled="!prompt.trim() || !chat.initialized || chat.historyLoading || Boolean(chat.currentSession?.loadError)" type="button" aria-label="发送消息" @click="sendMessage()"><ArrowUp :size="18" /></button>
+          <button v-else class="send-button" :disabled="!prompt.trim() || Boolean(attachment && attachment.status !== 'ready') || !chat.initialized || chat.historyLoading || Boolean(chat.currentSession?.loadError)" type="button" aria-label="发送消息" @click="sendMessage()"><ArrowUp :size="18" /></button>
         </div>
       </section>
       <div class="composer-note"><span><i></i> 企业数据仅在当前工作区内使用</span><span>Enter 发送 · Shift + Enter 换行</span></div>

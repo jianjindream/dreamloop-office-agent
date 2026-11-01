@@ -104,6 +104,7 @@ export interface ServerMessage {
   role: 'user' | 'assistant'
   content: string
   created_at: string
+  metadata?: { mode?: string; intent?: string; knowledge_scope?: string; document_ids?: string[]; search_results?: SearchResult[] }
 }
 
 export interface SystemStatus {
@@ -138,6 +139,8 @@ export interface ChatRequest {
   explicit: boolean
   user_id: string
   session_id: string
+  knowledge_scope?: 'none' | 'workspace' | 'selected'
+  document_ids?: string[]
 }
 
 export interface ReActStep {
@@ -166,6 +169,15 @@ export interface RagChunk {
 export interface SearchResult {
   chunk: RagChunk
   similarity: number
+  context_id?: number
+  document_id?: string
+  version_id?: string
+  document_title?: string
+  version?: number
+  locator?: string
+  excerpt?: string
+  retrieval_source?: string
+  fallback?: boolean
 }
 
 export interface ChatResponse {
@@ -173,6 +185,9 @@ export interface ChatResponse {
   query?: string
   answer?: string
   mode?: string
+  intent?: string
+  knowledge_scope?: string
+  document_ids?: string[]
   steps?: ReActStep[]
   tool_call?: ToolCallResult
   search_results?: SearchResult[]
@@ -183,6 +198,7 @@ export interface ChatResponse {
 export type StreamEventType =
   | 'start'
   | 'mode'
+  | 'intent'
   | 'step'
   | 'tool_call'
   | 'observation'

@@ -35,6 +35,8 @@ public class RagChunkRepository {
     public static class ContextRow {
         public long childId;
         public long contextId;
+        public String docHash;
+        public int parentIdx;
         public String content;
     }
 
@@ -122,8 +124,8 @@ public class RagChunkRepository {
         Connection connection = pg.connection();
         if (connection == null || ids == null || ids.isEmpty()) return contexts;
         String placeholders = String.join(",", ids.stream().map(id -> "?").toArray(String[]::new));
-        String sql = "SELECT c.id AS child_id, COALESCE(p.id, c.id) AS context_id, " +
-                "COALESCE(p.content, c.content) AS content FROM rag_chunks c " +
+        String sql = "SELECT c.id AS child_id, COALESCE(p.id, c.id) AS context_id, c.doc_hash, " +
+                "COALESCE(p.parent_idx, c.chunk_idx) AS parent_idx, COALESCE(p.content, c.content) AS content FROM rag_chunks c " +
                 "LEFT JOIN rag_parent_chunks p ON p.id = c.parent_id WHERE c.id IN (" + placeholders + ")";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (int i = 0; i < ids.size(); i++) statement.setLong(i + 1, ids.get(i));
@@ -132,6 +134,8 @@ public class RagChunkRepository {
                     ContextRow context = new ContextRow();
                     context.childId = result.getLong("child_id");
                     context.contextId = result.getLong("context_id");
+                    context.docHash = result.getString("doc_hash");
+                    context.parentIdx = result.getInt("parent_idx");
                     context.content = result.getString("content");
                     contexts.add(context);
                 }

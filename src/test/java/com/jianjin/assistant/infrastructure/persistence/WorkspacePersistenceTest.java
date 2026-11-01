@@ -74,7 +74,7 @@ class WorkspacePersistenceTest {
 
     @Test void failedIndexKeepsDocumentAndCanBeRetriedWithoutCreatingAnotherVersion() {
         RagService rag=mock(RagService.class);
-        when(rag.ingest(anyString(),anyString())).thenThrow(new IllegalStateException("检索服务断开"));
+        when(rag.ingest(anyString(),anyString(),anyString())).thenThrow(new IllegalStateException("检索服务断开"));
         String id;
         try(WorkspaceDatabase database=open()) {
             JdbcLibraryRepo repo=new JdbcLibraryRepo(database);
@@ -86,10 +86,13 @@ class WorkspacePersistenceTest {
         try(WorkspaceDatabase database=open()) {
             JdbcLibraryRepo repo=new JdbcLibraryRepo(database);
             assertEquals("failed",repo.get(id).version.getMetadata().get("index_status"));
-            doReturn(Map.entry(2,"hash")).when(rag).ingest(anyString(),anyString());
+            doReturn(Map.entry(2,"hash")).when(rag).ingest(anyString(),anyString(),anyString());
             new DocumentLibraryService(repo,rag).reingest(id,null);
             assertEquals("indexed",repo.get(id).version.getMetadata().get("index_status"));
             assertEquals(1,repo.listVersions(id).size());
+            var citation=new DocumentLibraryService(repo,rag).resolveCitation("ws:user","hash");
+            assertNotNull(citation); assertEquals(id,citation.documentId()); assertEquals(1,citation.version());
+            assertNull(new DocumentLibraryService(repo,rag).resolveCitation("other:user","hash"));
         }
     }
 
@@ -101,6 +104,7 @@ class WorkspacePersistenceTest {
             assertTrue(repo.importSession("ws-a:user","legacy-1","周报",1000,messages));
             assertFalse(repo.importSession("ws-a:user","legacy-1","重复",1000,messages));
             repo.save("ws-b:user","legacy-1","user","另一个工作区");
+            repo.save("ws-b:user","legacy-1","assistant","带引用的回答","{\"search_results\":[{\"document_id\":\"doc_1\"}]}");
         }
         try(WorkspaceDatabase database=open()) {
             ChatHistoryRepository repo=new ChatHistoryRepository(database);
@@ -116,6 +120,7 @@ class WorkspacePersistenceTest {
             assertTrue(repo.deleteSession("ws-a:user","legacy-1"));
             assertTrue(repo.page("ws-a:user","legacy-1",0,500).isEmpty());
             assertEquals(1,repo.listSessions("ws-b:user").size());
+            assertTrue(repo.page("ws-b:user","legacy-1",0,10).get(1).metadata.contains("doc_1"));
         }
         try(WorkspaceDatabase database=open()) { assertTrue(new ChatHistoryRepository(database).listSessions("ws-a:user").isEmpty()); }
     }

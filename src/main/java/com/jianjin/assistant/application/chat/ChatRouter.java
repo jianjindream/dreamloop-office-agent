@@ -10,6 +10,23 @@ public final class ChatRouter {
 
     private ChatRouter() {}
 
+    /** Stable product-level office intent, independent from the execution mode. */
+    public static String detectOfficeIntent(String query) {
+        String q = query == null ? "" : query.toLowerCase(Locale.ROOT);
+        if (containsAny(q, "对比", "比较", "差异", "冲突")) return "compare";
+        if (containsAny(q, "提取", "抽取", "识别", "列出", "行动项", "待办")) return "extract";
+        if (containsAny(q, "总结", "汇总", "摘要", "概括")) return "summarize";
+        if (containsAny(q, "润色", "改写", "优化表达", "校对")) return "rewrite";
+        if (containsAny(q, "周报", "汇报", "方案", "纪要", "邮件", "起草", "撰写", "生成")) return "draft";
+        if (containsAny(q, "分析", "原因", "趋势", "风险")) return "analyze";
+        return "qa";
+    }
+
+    private static boolean containsAny(String value, String... tokens) {
+        for (String token : tokens) if (value.contains(token)) return true;
+        return false;
+    }
+
     /** 单一工具触发：时间 / 天气 / 搜索 / 查询 */
     public static boolean needTool(String query) {
         String q = query == null ? "" : query.toLowerCase(Locale.ROOT);
@@ -42,13 +59,21 @@ public final class ChatRouter {
     /** 选定模式：Explicit 模式时优先使用前端指定的 Tools/UseRAG，否则走规则。 */
     public static String decideMode(String query, boolean explicit, boolean useRag,
                                     List<String> selectedTools, boolean ragLoaded) {
+        return decideMode(query, explicit, useRag, selectedTools, ragLoaded, false);
+    }
+
+    /** A selected-document scope always wins over broad keyword routing. */
+    public static String decideMode(String query, boolean explicit, boolean useRag,
+                                    List<String> selectedTools, boolean ragLoaded,
+                                    boolean selectedDocumentScope) {
         if (explicit) {
             if (selectedTools != null && !selectedTools.isEmpty()) {
                 return "react";
             }
-            if (useRag && ragLoaded) return "rag";
+            if (useRag && (ragLoaded || selectedDocumentScope)) return "rag";
             return "chat";
         }
+        if (selectedDocumentScope) return "rag";
         if (needReAct(query)) return "react";
         if (needTool(query)) return "tool";
         if (needRAG(query, ragLoaded)) return "rag";

@@ -26,4 +26,20 @@ describe('workspace preferences', () => {
     expect(store.contextOpen).toBe(false)
     expect(store.knowledgeEnabled).toBe(true)
   })
+
+  it('persists selected document scope per authenticated workspace', () => {
+    const store = useWorkspaceStore()
+    store.initializeContext('scope-a')
+    store.toggleDocument('doc-a')
+    store.toggleDocument('doc-b')
+    expect(store.selectedDocumentIds).toEqual(['doc-a', 'doc-b'])
+    expect(localStorage.getItem('scope-a:knowledge-context')).toBe('["doc-a","doc-b"]')
+    store.retainDocuments(['doc-b'])
+    expect(store.selectedDocumentIds).toEqual(['doc-b'])
+
+    setActivePinia(createPinia())
+    const restored = useWorkspaceStore()
+    restored.initializeContext('scope-a')
+    expect(restored.selectedDocumentIds).toEqual(['doc-b'])
+  })
 })

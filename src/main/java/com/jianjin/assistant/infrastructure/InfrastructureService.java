@@ -217,7 +217,7 @@ public class InfrastructureService {
     }
 
     public static class RagContextRow {
-        public long childId; public long contextId; public String content;
+        public long childId; public long contextId; public String docHash; public int parentIdx; public String content;
     }
 
     public static class RagParentContextRow {
@@ -228,7 +228,8 @@ public class InfrastructureService {
         List<RagContextRow> out = new ArrayList<>();
         for (RagChunkRepository.ContextRow r : ragChunkRepo.loadContextsByChildIds(childIds)) {
             RagContextRow row = new RagContextRow();
-            row.childId = r.childId; row.contextId = r.contextId; row.content = r.content;
+            row.childId = r.childId; row.contextId = r.contextId; row.docHash = r.docHash;
+            row.parentIdx = r.parentIdx; row.content = r.content;
             out.add(row);
         }
         return out;
@@ -255,6 +256,10 @@ public class InfrastructureService {
 
     public long saveChatHistory(String userId, String sessionId, String role, String content) {
         return chatHistoryRepo.save(userId, sessionId, role, content);
+    }
+
+    public long saveChatHistory(String userId, String sessionId, String role, String content, String metadata) {
+        return chatHistoryRepo.save(userId, sessionId, role, content, metadata);
     }
 
     public static class ChatHistoryRow {

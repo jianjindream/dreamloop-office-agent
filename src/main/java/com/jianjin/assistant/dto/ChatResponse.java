@@ -13,6 +13,11 @@ public class ChatResponse {
     private String query;
     private String answer;
     private String mode;
+    private String intent;
+    @JsonProperty("knowledge_scope")
+    private String knowledgeScope;
+    @JsonProperty("document_ids")
+    private List<String> documentIds;
     private List<ReActStep> steps;
     @JsonProperty("tool_call")
     private ToolCallResult toolCall;
@@ -37,6 +42,12 @@ public class ChatResponse {
     public void setAnswer(String answer) { this.answer = answer; }
     public String getMode() { return mode; }
     public void setMode(String mode) { this.mode = mode; }
+    public String getIntent() { return intent; }
+    public void setIntent(String intent) { this.intent = intent; }
+    public String getKnowledgeScope() { return knowledgeScope; }
+    public void setKnowledgeScope(String knowledgeScope) { this.knowledgeScope = knowledgeScope; }
+    public List<String> getDocumentIds() { return documentIds; }
+    public void setDocumentIds(List<String> documentIds) { this.documentIds = documentIds; }
     public List<ReActStep> getSteps() { return steps; }
     public void setSteps(List<ReActStep> steps) { this.steps = steps; }
     public ToolCallResult getToolCall() { return toolCall; }
@@ -59,11 +70,38 @@ public class ChatResponse {
     public static class SearchResultDto {
         private Chunk chunk;
         private double similarity;
+        @JsonProperty("context_id") private long contextId;
+        @JsonProperty("document_id") private String documentId;
+        @JsonProperty("version_id") private String versionId;
+        @JsonProperty("document_title") private String documentTitle;
+        private Integer version;
+        private String locator;
+        private String excerpt;
+        @JsonProperty("retrieval_source") private String retrievalSource;
+        private boolean fallback;
         public SearchResultDto() {}
         public SearchResultDto(Chunk chunk, double similarity) { this.chunk = chunk; this.similarity = similarity; }
         public Chunk getChunk() { return chunk; }
         public void setChunk(Chunk chunk) { this.chunk = chunk; }
         public double getSimilarity() { return similarity; }
         public void setSimilarity(double similarity) { this.similarity = similarity; }
+        public long getContextId() { return contextId; }
+        public void setContextId(long contextId) { this.contextId = contextId; }
+        public String getDocumentId() { return documentId; }
+        public void setDocumentId(String documentId) { this.documentId = documentId; }
+        public String getVersionId() { return versionId; }
+        public void setVersionId(String versionId) { this.versionId = versionId; }
+        public String getDocumentTitle() { return documentTitle; }
+        public void setDocumentTitle(String documentTitle) { this.documentTitle = documentTitle; }
+        public Integer getVersion() { return version; }
+        public void setVersion(Integer version) { this.version = version; }
+        public String getLocator() { return locator; }
+        public void setLocator(String locator) { this.locator = locator; }
+        public String getExcerpt() { return excerpt; }
+        public void setExcerpt(String excerpt) { this.excerpt = excerpt; }
+        public String getRetrievalSource() { return retrievalSource; }
+        public void setRetrievalSource(String retrievalSource) { this.retrievalSource = retrievalSource; }
+        public boolean isFallback() { return fallback; }
+        public void setFallback(boolean fallback) { this.fallback = fallback; }
     }
 }

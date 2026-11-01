@@ -13,6 +13,9 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 
 @Service
 public class DocumentLibraryService {
@@ -39,7 +42,8 @@ public class DocumentLibraryService {
             try {
                 repo.putVersionMetadata(wr.version.getId(), "index_status", "indexing");
                 Object owner = wr.version.getMetadata().get("owner_key");
-                Map.Entry<Integer, String> ingest = rag.ingest(owner == null ? "default:default" : String.valueOf(owner), wr.version.getContentMd());
+                Map.Entry<Integer, String> ingest = rag.ingest(owner == null ? "default:default" : String.valueOf(owner),
+                        wr.document.getId() + ":" + wr.version.getId(), wr.version.getContentMd());
                 out.ingestChunks = ingest.getKey();
                 out.ingestDocHash = ingest.getValue();
                 repo.putVersionMetadata(wr.version.getId(), "doc_hash", ingest.getValue());
@@ -69,6 +73,34 @@ public class DocumentLibraryService {
     public List<DocumentVersion> listVersions(String documentId) {
         return repo.listVersions(documentId);
     }
+
+    /** Resolves a RAG hash back to the immutable office-document version shown to the user. */
+    public CitationTarget resolveCitation(String ownerKey, String docHash) {
+        return resolveCitations(ownerKey, List.of(docHash == null ? "" : docHash)).get(docHash);
+    }
+
+    public Map<String, CitationTarget> resolveCitations(String ownerKey, Collection<String> docHashes) {
+        LinkedHashSet<String> remaining = new LinkedHashSet<>();
+        if (docHashes != null) for (String hash : docHashes) if (hash != null && !hash.isBlank()) remaining.add(hash);
+        Map<String, CitationTarget> resolved = new LinkedHashMap<>();
+        if (remaining.isEmpty()) return resolved;
+        for (Document document : repo.list()) {
+            for (DocumentVersion version : repo.listVersions(document.getId())) {
+                Object owner = version.getMetadata().get("owner_key");
+                Object hash = version.getMetadata().get("doc_hash");
+                String value = String.valueOf(hash);
+                boolean owned = ownerKey.equals(String.valueOf(owner)) || (owner == null && "default:default".equals(ownerKey));
+                if (remaining.contains(value) && owned) {
+                    resolved.put(value, new CitationTarget(document.getId(), document.getTitle(), version.getId(), version.getVersion()));
+                    remaining.remove(value);
+                    if (remaining.isEmpty()) return resolved;
+                }
+            }
+        }
+        return resolved;
+    }
+
+    public record CitationTarget(String documentId, String title, String versionId, int version) {}
 
     public boolean delete(String documentId) {
         LibraryRepo.DocumentWithVersion current = repo.get(documentId);
@@ -101,7 +133,8 @@ public class DocumentLibraryService {
         if (!documentId.equals(ver.getDocumentId())) throw new IllegalArgumentException("版本不属于当前文档");
         try {
             repo.putVersionMetadata(ver.getId(), "index_status", "indexing");
-            Map.Entry<Integer, String> result = rag.ingest(owner == null ? "default:default" : String.valueOf(owner), ver.getContentMd());
+            Map.Entry<Integer, String> result = rag.ingest(owner == null ? "default:default" : String.valueOf(owner),
+                    documentId + ":" + ver.getId(), ver.getContentMd());
             repo.putVersionMetadata(ver.getId(), "doc_hash", result.getValue());
             repo.putVersionMetadata(ver.getId(), "index_status", "indexed");
             return result;

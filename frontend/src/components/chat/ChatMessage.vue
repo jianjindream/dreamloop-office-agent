@@ -2,6 +2,7 @@
 import { Check, Copy, FilePlus2, RefreshCw, ShieldCheck, Sparkles, Square, ThumbsDown, ThumbsUp, UserRound } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 import type { ChatMessage } from '@/stores/chat'
+import type { SearchResult } from '@/types/api'
 import ExecutionTimeline from './ExecutionTimeline.vue'
 import MarkdownContent from './MarkdownContent.vue'
 import SourceList from './SourceList.vue'
@@ -11,6 +12,7 @@ const emit = defineEmits<{
   retry: [messageId: string]
   toDocument: [messageId: string]
   confirmCommand: [token: string, messageId: string]
+  openSource: [source: SearchResult]
 }>()
 const copied = ref(false)
 const confirmationToken = computed(() => {
@@ -47,7 +49,7 @@ const copyMessage = async () => {
           <button type="button" @click="emit('confirmCommand', confirmationToken, message.id)">审阅并确认执行</button>
         </div>
         <div v-if="message.status === 'stopped'" class="stopped-note"><Square :size="10" />已停止生成</div>
-        <SourceList :sources="message.sources" />
+        <SourceList :sources="message.sources" @open-document="emit('openSource', $event)" />
         <div v-if="message.status === 'complete'" class="message-actions">
           <button type="button" :aria-label="copied ? '已复制' : '复制回答'" @click="copyMessage"><Check v-if="copied" :size="14" /><Copy v-else :size="14" /><span>{{ copied ? '已复制' : '复制' }}</span></button>
           <button type="button" aria-label="将回答转为文档" @click="emit('toDocument', message.id)"><FilePlus2 :size="14" /><span>转为文档</span></button>

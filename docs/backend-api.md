@@ -30,6 +30,15 @@
 
 各事件原有业务字段与上述字段位于同一层，以兼容现有客户端。取消指定任务使用 `POST /chat/tasks/{taskId}/cancel`；服务端同时校验任务所属用户和工作区。
 
+### 对话资料范围与引用
+
+`POST /chat` 和 `POST /chat/stream` 支持：
+
+- `knowledge_scope`：`none`、`workspace` 或 `selected`。
+- `document_ids`：`selected` 范围内的文档 ID，去重后最多 20 个。只要传入文档 ID，服务端就按精确资料范围执行。
+
+服务端不信任客户端提供的索引哈希，会按当前身份重新读取文档并校验归属、回收站状态和最新版本索引状态。未索引资料返回 `409 DOCUMENT_NOT_INDEXED`，越权资料按不存在处理。响应增加 `intent`、`knowledge_scope`、`document_ids`；`search_results` 中包含 `document_id`、`version_id`、`document_title`、`version`、`locator`、`excerpt` 和检索来源。助手消息的这些元数据保存在服务端会话历史中。
+
 ## 文档与上传
 
 - `POST /documents`、`PUT /documents/{id}`：创建或更新文档；更新标题即重命名。

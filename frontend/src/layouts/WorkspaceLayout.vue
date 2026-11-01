@@ -13,7 +13,12 @@ const workspace = useWorkspaceStore()
 const canvas = useDocumentCanvasStore()
 const chat = useChatStore()
 onMounted(() => { void chat.initialize() })
-watch(() => chat.cacheScope, (scope) => { if (scope) canvas.initializeDraft(scope) })
+watch(() => chat.cacheScope, (scope) => {
+  if (scope) {
+    canvas.initializeDraft(scope)
+    workspace.initializeContext(scope)
+  }
+})
 const DocumentCanvas = defineAsyncComponent(() => import('@/components/document/DocumentCanvas.vue'))
 const showCanvas = computed(() => canvas.open && (route.name === 'chat' || route.name === 'documents'))
 const showContext = computed(() => !showCanvas.value && Boolean(route.meta.showContext) && workspace.contextOpen)

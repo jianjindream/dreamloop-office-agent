@@ -25,6 +25,14 @@ public class StreamEvent {
         return new StreamEvent("mode", Map.of("mode", mode));
     }
 
+    public static StreamEvent intent(String intent, String knowledgeScope, List<String> documentIds) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("intent", intent == null ? "qa" : intent);
+        data.put("knowledge_scope", knowledgeScope == null ? "none" : knowledgeScope);
+        data.put("document_ids", documentIds == null ? List.of() : documentIds);
+        return new StreamEvent("intent", data);
+    }
+
     public static StreamEvent step(int idx, String name) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("idx", idx);

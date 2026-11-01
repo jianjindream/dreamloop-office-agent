@@ -44,6 +44,16 @@ describe('server conversation history', () => {
     expect(store.currentSession?.messages).toHaveLength(501)
   })
 
+  it('restores persisted source citations from server message metadata', async () => {
+    vi.mocked(agentApi.sessionMessages).mockResolvedValue([{ ...message, role: 'assistant', metadata: {
+      mode: 'rag', search_results: [{ chunk: { content: '完成率 75%' }, similarity: 0.9,
+        document_id: 'doc-a', version_id: 'ver-a', document_title: '项目周报', version: 2, locator: '原文片段 3' }],
+    } }])
+    const store = useChatStore(); await store.initialize()
+    expect(store.currentSession?.messages[0]?.mode).toBe('rag')
+    expect(store.currentSession?.messages[0]?.sources[0]).toMatchObject({ document_id: 'doc-a', version: 2, locator: '原文片段 3' })
+  })
+
   it('migrates verifiable legacy history once and preserves the original backup', async () => {
     localStorage.setItem('dreamloop-user-id', 'user-a')
     localStorage.setItem('dreamloop-chat-sessions-v2', JSON.stringify(legacy))

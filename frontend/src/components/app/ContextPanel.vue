@@ -1,23 +1,37 @@
 <script setup lang="ts">
 import {
-  ChevronRight,
+  Check,
   CircleCheck,
   FileText,
   Globe2,
   LibraryBig,
   MoreHorizontal,
-  Paperclip,
+  RefreshCw,
   Settings2,
 } from 'lucide-vue-next'
+import { computed, onMounted, ref } from 'vue'
+import { agentApi } from '@/api/agent'
 import { useWorkspaceStore } from '@/stores/workspace'
+import type { DocumentSummary } from '@/types/api'
 
 const workspace = useWorkspaceStore()
-
-const resources = [
-  { title: '产品需求说明书.md', meta: '2.8 MB · 38 个片段', icon: FileText },
-  { title: '用户研究报告.pdf', meta: '6.4 MB · 72 个片段', icon: Paperclip },
-  { title: '行业洞察资料库', meta: '知识库 · 126 个片段', icon: LibraryBig },
-]
+const documents = ref<DocumentSummary[]>([])
+const loading = ref(false)
+const error = ref('')
+const selected = computed(() => documents.value.filter((doc) => workspace.selectedDocumentIds.includes(String(doc.id))))
+const scopeLabel = computed(() => !workspace.knowledgeEnabled
+  ? '本次不使用资料'
+  : workspace.selectedDocumentIds.length ? `仅检索已选 ${workspace.selectedDocumentIds.length} 份资料` : '检索整个工作区')
+const loadDocuments = async () => {
+  loading.value = true
+  error.value = ''
+  try {
+    documents.value = (await agentApi.documents()).filter((doc) => doc.status !== 'deleted')
+    workspace.retainDocuments(documents.value.map((doc) => String(doc.id)))
+  } catch (reason) { error.value = reason instanceof Error ? reason.message : '资料加载失败' }
+  finally { loading.value = false }
+}
+onMounted(loadDocuments)
 </script>
 
 <template>
@@ -46,32 +60,36 @@ const resources = [
         <span class="resource-icon knowledge"><LibraryBig :size="16" /></span>
         <span class="toggle-copy">
           <strong>工作区知识库</strong>
-          <small>{{ workspace.knowledgeEnabled ? '已启用语义检索' : '已暂停使用' }}</small>
+          <small>{{ scopeLabel }}</small>
         </span>
         <span class="switch"><i></i></span>
       </button>
-      <button class="context-toggle enabled" type="button">
+      <div class="context-toggle enabled">
         <span class="resource-icon web"><Globe2 :size="16" /></span>
         <span class="toggle-copy">
           <strong>联网搜索</strong>
           <small>需要时自动调用</small>
         </span>
         <span class="switch"><i></i></span>
-      </button>
+      </div>
     </section>
 
     <section class="context-section">
       <div class="section-title">
-        <span>已选择的资料</span>
-        <button type="button">管理</button>
+        <span>精确资料范围</span>
+        <button v-if="workspace.selectedDocumentIds.length" type="button" @click="workspace.clearDocuments">清空</button>
+        <button v-else type="button" :disabled="loading" aria-label="刷新资料" @click="loadDocuments"><RefreshCw :size="13" /></button>
       </div>
-      <button v-for="item in resources" :key="item.title" class="resource-item" type="button">
-        <span class="resource-icon"><component :is="item.icon" :size="15" /></span>
+      <p v-if="error" class="context-error">{{ error }}</p>
+      <p v-else-if="loading" class="context-empty">正在加载资料…</p>
+      <p v-else-if="!documents.length" class="context-empty">暂无资料，可在输入框上传附件。</p>
+      <button v-for="item in documents" :key="item.id" class="resource-item" :class="{ selected: workspace.selectedDocumentIds.includes(String(item.id)) }" type="button" @click="workspace.toggleDocument(String(item.id))">
+        <span class="resource-icon"><FileText :size="15" /></span>
         <span class="resource-copy">
           <strong>{{ item.title }}</strong>
-          <small>{{ item.meta }}</small>
+          <small>版本 {{ item.latestVersion || 1 }} · {{ item.status === 'draft' ? '草稿' : '已保存' }}</small>
         </span>
-        <ChevronRight :size="14" />
+        <span class="select-mark"><Check v-if="workspace.selectedDocumentIds.includes(String(item.id))" :size="12" /></span>
       </button>
     </section>
 
@@ -80,16 +98,16 @@ const resources = [
       <div class="activity-card">
         <div><CircleCheck :size="15" /> 上下文已就绪</div>
         <dl>
-          <div><dt>知识片段</dt><dd>236</dd></div>
-          <div><dt>可用工具</dt><dd>6</dd></div>
-          <div><dt>上下文窗口</dt><dd>32K</dd></div>
+          <div><dt>已选资料</dt><dd>{{ selected.length }}</dd></div>
+          <div><dt>检索范围</dt><dd>{{ !workspace.knowledgeEnabled ? '关闭' : selected.length ? '精确' : '工作区' }}</dd></div>
+          <div><dt>引用定位</dt><dd>开启</dd></div>
         </dl>
       </div>
     </section>
 
     <div class="context-tip">
       <span>提示</span>
-      <p>选择更准确的资料，可以获得更可靠的回答和引用来源。</p>
+      <p>选择资料后，本次提问只会检索这些文档；清空选择后恢复整个工作区。</p>
     </div>
   </aside>
 </template>
@@ -229,6 +247,11 @@ const resources = [
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.resource-item.selected { background: var(--brand-softer); color: var(--brand); }
+.select-mark { display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border:1px solid var(--border-strong);border-radius:5px; }
+.resource-item.selected .select-mark { border-color:var(--brand);background:var(--brand);color:white; }
+.context-empty,.context-error { margin:8px;padding:8px;border-radius:8px;color:var(--text-faint);font-size:9px;line-height:1.5; }
+.context-error { color:var(--danger);background:color-mix(in srgb,var(--danger) 6%,transparent); }
 
 .switch {
   position: relative;

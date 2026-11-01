@@ -52,4 +52,17 @@ class ChatRouterTest {
         assertTrue(ChatRouter.needTool("Java 是什么"));
         assertFalse(ChatRouter.needTool("你好"));
     }
+
+    @Test
+    void selectedDocumentsOverrideBroadToolKeywords() {
+        assertEquals("rag", ChatRouter.decideMode("这个指标是什么", false, true, null, true, true));
+    }
+
+    @Test
+    void detectsOfficeIntentsWithConflictTakingPriority() {
+        assertEquals("compare", ChatRouter.detectOfficeIntent("总结两个版本的差异和冲突"));
+        assertEquals("extract", ChatRouter.detectOfficeIntent("提取会议行动项"));
+        assertEquals("draft", ChatRouter.detectOfficeIntent("撰写本周周报"));
+        assertEquals("qa", ChatRouter.detectOfficeIntent("负责人是谁"));
+    }
 }

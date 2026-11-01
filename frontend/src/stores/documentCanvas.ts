@@ -118,6 +118,40 @@ export const useDocumentCanvasStore = defineStore('documentCanvas', {
         if (requestId === this.requestId) this.loading = false
       }
     },
+    async openDocumentVersion(id: string | number, versionId: string) {
+      const requestId = ++this.requestId
+      this.open = true
+      this.loading = true
+      this.saving = false
+      this.error = ''
+      this.notice = ''
+      try {
+        const [detail, versions] = await Promise.all([agentApi.document(id), agentApi.documentVersions(id)])
+        if (requestId !== this.requestId) return
+        const version = versions.find((item) => String(item.id) === versionId)
+        if (!version) throw new Error('引用版本不存在或已不可访问')
+        const metadata = documentMetadata({ document: detail.document, version })
+        this.documentId = String(detail.document.id)
+        this.title = detail.document.title
+        this.content = version.contentMd ?? ''
+        this.savedTitle = this.title
+        this.savedContent = this.content
+        this.docType = detail.document.docType || 'note'
+        this.status = detail.document.status || 'active'
+        this.version = version.version
+        this.sourceSessionId = String(metadata.chatSessionId ?? '')
+        this.sourceMessageId = String(metadata.chatMessageId ?? '')
+        this.indexStatus = String(metadata.index_status ?? 'not_indexed')
+        this.hasOriginal = Boolean(metadata.original_attachment)
+        this.originalFilename = String(metadata.original_filename ?? this.title)
+        this.notice = `正在查看引用时使用的历史版本 ${version.version}；如需编辑，请先确认当前最新版本。`
+      } catch (error) {
+        if (requestId !== this.requestId) return
+        this.error = error instanceof Error ? error.message : '加载引用版本失败'
+      } finally {
+        if (requestId === this.requestId) this.loading = false
+      }
+    },
     async save(automatic = false) {
       if (this.saving || this.loading) return false
       const title = this.title.trim()

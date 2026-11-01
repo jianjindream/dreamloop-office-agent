@@ -95,6 +95,7 @@ public class WorkspaceDatabase implements AutoCloseable {
           session_id TEXT NOT NULL DEFAULT 'default', role TEXT NOT NULL, content TEXT NOT NULL,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)
         """,
+        "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}'",
         "CREATE INDEX IF NOT EXISTS idx_chat_history_scope ON chat_history(user_id, session_id, id)"
     };
 }
