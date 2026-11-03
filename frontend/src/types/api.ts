@@ -123,6 +123,67 @@ export interface ReviewDiff {
   changes: Array<{ type: 'added' | 'removed' | 'unchanged'; originalLine: number; revisedLine: number; text: string }>
 }
 
+export interface WorkspaceMember {
+  workspaceId: string
+  userId: string
+  displayName: string
+  email: string
+  role: 'owner' | 'admin' | 'editor' | 'viewer'
+  status: 'active' | 'invited' | 'suspended'
+  invitedBy: string
+  createdAt: string
+  updatedAt: string
+  administrator: boolean
+  editor: boolean
+}
+
+export interface ConnectionProvider { id: string; name: string; capabilities: string[] }
+export interface OfficeConnection {
+  id: string
+  workspaceId: string
+  provider: string
+  providerName: string
+  displayName: string
+  status: 'connected' | 'authorization_required' | string
+  credentialRef: string
+  config: Record<string, unknown>
+  capabilities: string[]
+  lastTestedAt?: string
+  lastSyncAt?: string
+  updatedAt: string
+}
+
+export interface OfficeTask {
+  id: string
+  workspaceId: string
+  userId: string
+  taskType: string
+  title: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+  progress: number
+  message: string
+  result?: unknown
+  error?: string
+  cancelRequested: boolean
+  createdAt: string
+  startedAt?: string
+  finishedAt?: string
+  updatedAt: string
+}
+
+export interface PilotDashboard {
+  generatedReports: number
+  completedReports: number
+  exportedReports: number
+  averageCompletionSeconds: number
+  averageEditCount: number
+  factErrorRate: number
+  reuseRate: number
+  averageRating: number
+  feedbackCount: number
+  recentComments: string[]
+}
+
 export interface McpRegistration {
   name: string
   description: string

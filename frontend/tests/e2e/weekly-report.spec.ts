@@ -8,7 +8,7 @@ const mockWeeklyReport = async (page: Page) => {
     if (route.request().method() === 'POST') return route.fulfill({ json: { id: 'custom-1', name: '公司模板', description: '', builtIn: false, contentMd: '# {{项目名称}}' } })
     return route.fulfill({ json: [{ id: 'builtin-weekly-report', name: '标准项目周报', description: '', builtIn: true, contentMd: '' }] })
   })
-  await page.route('**/api/weekly-report/generate', (route) => route.fulfill({ json: {
+  const reportResult = {
     documentId: 'report-1', versionId: 'report-v1', version: 1,
     contentMd: '# 星桥客户门户项目周报\n\n## 本周完成\n- 资料下载功能通过验收 [S1]',
     review: {
@@ -17,7 +17,12 @@ const mockWeeklyReport = async (page: Page) => {
     },
     sources: [{ sourceId: 'S1', documentId: 'source-1', versionId: 'source-v2', version: 2, title: '本期项目记录.xlsx', locator: 'v2' }],
     indexStatus: 'not_indexed',
+  }
+  await page.route('**/api/tasks/weekly-report', (route) => route.fulfill({ json: {
+    id: 'task-1', status: 'succeeded', progress: 100, message: '任务完成', result: reportResult,
+    taskType: 'weekly_report', title: '星桥客户门户项目周报', createdAt: new Date().toISOString(), cancelRequested: false,
   } }))
+  await page.route('**/api/pilot/events', (route) => route.fulfill({ json: { ok: true } }))
   await page.route('**/api/weekly-report/compare', (route) => route.fulfill({ json: { added: 1, removed: 0, unchanged: 3, changes: [{ type: 'added', originalLine: 0, revisedLine: 5, text: '- 人工补充' }] } }))
   await page.route('**/api/documents/report-1', (route) => route.fulfill({ json: {
     document: { id: 'report-1', title: '星桥客户门户项目周报', latestVersion: 2 },

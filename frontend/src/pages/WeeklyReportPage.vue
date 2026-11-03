@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AlertTriangle, Calculator, CheckCircle2, Download, FileText, LoaderCircle, Plus, Save } from 'lucide-vue-next'
 import { agentApi } from '@/api/agent'
 import MarkdownContent from '@/components/chat/MarkdownContent.vue'
-import type { DocumentSummary, ReviewDiff, WeeklyReportResult, WeeklyReportTemplate } from '@/types/api'
+import type { DocumentSummary, OfficeTask, ReviewDiff, WeeklyReportResult, WeeklyReportTemplate } from '@/types/api'
 
 const today = new Date()
 const end = today.toISOString().slice(0, 10)
@@ -29,6 +29,8 @@ const showTemplateForm = ref(false)
 const templateName = ref('')
 const templateDescription = ref('')
 const templateContent = ref('# {{项目名称}}项目周报\n\n汇报周期：{{开始日期}} 至 {{结束日期}}\n\n## 本周摘要\n{{本周摘要}}\n\n## 本周完成\n{{本周完成}}\n\n## 进行中事项\n{{进行中事项}}\n\n## 风险与阻塞\n{{风险与阻塞}}\n\n## 下周计划\n{{下周计划}}\n\n## 待确认信息\n{{待确认信息}}\n\n## 资料来源与版本\n{{资料来源与版本}}')
+let generationToken = 0
+let reportStartedAt = 0
 
 const eligibleDocuments = computed(() => documents.value.filter((doc) => doc.docType !== 'weekly_report_template' && doc.status !== 'deleted'))
 const issueCount = computed(() => (result.value?.review.conflicts.length ?? 0) + (result.value?.review.missing.length ?? 0))
@@ -45,11 +47,22 @@ const generate = async () => {
   error.value = ''
   if (!projectName.value.trim() || !selectedIds.value.length) { error.value = '请填写项目名称并至少选择一份资料'; return }
   generating.value = true
+  const token = ++generationToken
+  reportStartedAt = Date.now()
   try {
-    result.value = await agentApi.generateWeeklyReport({
+    void agentApi.recordPilotEvent({ eventType: 'report_started', metadata: { project_name: projectName.value.trim() } }).catch(() => undefined)
+    let task: OfficeTask = await agentApi.submitWeeklyReport({
       project_name: projectName.value.trim(), period_start: periodStart.value, period_end: periodEnd.value,
       template_id: templateId.value, document_ids: selectedIds.value, user_facts: userFacts.value, save_draft: true,
     })
+    for (let attempt = 0; attempt < 240 && (task.status === 'queued' || task.status === 'running'); attempt++) {
+      await new Promise((resolve) => window.setTimeout(resolve, 500))
+      if (token !== generationToken) return
+      task = await agentApi.task(task.id)
+    }
+    if (task.status !== 'succeeded') throw new Error(task.error || task.message || '后台任务未完成')
+    result.value = task.result as WeeklyReportResult
+    if (!result.value?.contentMd) throw new Error('后台任务没有返回周报结果')
     generatedContent.value = result.value.contentMd
     editedContent.value = result.value.contentMd
     diff.value = null
@@ -73,6 +86,9 @@ const save = async () => {
       metadata: { project_name: projectName.value, period_start: periodStart.value, period_end: periodEnd.value },
     })
     if (saved.version) { result.value.version = saved.version.version; result.value.versionId = String(saved.version.id) }
+    const changes = await agentApi.compareWeeklyReport(generatedContent.value, editedContent.value)
+    void agentApi.recordPilotEvent({ eventType: 'report_completed', reportId: result.value.documentId,
+      durationMs: reportStartedAt ? Date.now() - reportStartedAt : undefined, editCount: changes.added + changes.removed }).catch(() => undefined)
     generatedContent.value = editedContent.value
     diff.value = null
     toast.value = '修改已保存为新的正式版本。'
@@ -84,6 +100,7 @@ const exportFile = async (format: 'docx' | 'pdf') => {
   if (!result.value) return
   try {
     const blob = await agentApi.exportDocument(result.value.documentId, format, result.value.versionId)
+    void agentApi.recordPilotEvent({ eventType: 'report_exported', reportId: result.value.documentId, metadata: { format } }).catch(() => undefined)
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${projectName.value}项目周报.${format}`; anchor.click()
     URL.revokeObjectURL(url)
@@ -98,6 +115,7 @@ const createTemplate = async () => {
 }
 
 onMounted(() => { void load() })
+onBeforeUnmount(() => { generationToken++ })
 </script>
 
 <template>
@@ -117,7 +135,7 @@ onMounted(() => { void load() })
         <div class="source-picker"><strong>参与处理的资料</strong><span>已选 {{ selectedIds.length }} / 20</span><div class="source-list"><label v-for="doc in eligibleDocuments" :key="String(doc.id)" class="source-item"><input v-model="selectedIds" type="checkbox" :value="String(doc.id)" :disabled="selectedIds.length >= 20 && !selectedIds.includes(String(doc.id))" /><FileText :size="16" /><span><b>{{ doc.title }}</b><small>v{{ doc.latestVersion }} · {{ doc.docType || '文档' }}</small></span></label><p v-if="!eligibleDocuments.length">请先到知识库上传项目资料。</p></div></div>
         <label class="facts-field">用户补充事实（单独标注来源）<textarea v-model="userFacts" rows="3" placeholder="可选。不要在这里填写尚未确认的推测。"></textarea></label>
         <p v-if="error" class="error-message" role="alert">{{ error }}</p>
-        <button class="primary-button generate-button" type="button" :disabled="generating" @click="generate"><LoaderCircle v-if="generating" class="spin" :size="16" />{{ generating ? '正在核对资料…' : '生成并保存草稿' }}</button>
+        <button class="primary-button generate-button" type="button" :disabled="generating" @click="generate"><LoaderCircle v-if="generating" class="spin" :size="16" />{{ generating ? '后台任务执行中…' : '生成并保存草稿' }}</button>
       </section>
 
       <template v-if="result">

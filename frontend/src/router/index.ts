@@ -34,6 +34,12 @@ const router = createRouter({
           meta: { title: '项目周报', eyebrow: 'Office Workflow' },
         },
         {
+          path: 'operations',
+          name: 'operations',
+          component: () => import('@/pages/OperationsPage.vue'),
+          meta: { title: '运营中心', eyebrow: 'Workspace Operations' },
+        },
+        {
           path: 'tools',
           name: 'tools',
           component: () => import('@/pages/ToolsPage.vue'),

@@ -123,6 +123,9 @@ public class WeeklyReportService {
                 "## 资料来源与版本\n{{资料来源与版本}}");
     }
 
+    /** Internal task metadata lookup; access checks remain at the task submission boundary. */
+    public String documentType(String documentId) { return library.get(documentId).document.getDocType(); }
+
     private void validate(GenerateRequest request) {
         if (request == null || request.projectName() == null || request.projectName().isBlank()
                 || request.periodStart() == null || request.periodEnd() == null

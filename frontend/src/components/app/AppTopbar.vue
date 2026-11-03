@@ -33,6 +33,8 @@ const pages = [
   { label: 'AI 对话', description: '打开聊天工作台', to: '/chat' },
   { label: '知识库', description: '浏览和上传资料', to: '/knowledge' },
   { label: 'AI 文档', description: '打开文档工作台', to: '/documents' },
+  { label: '项目周报', description: '生成和审阅项目周报', to: '/weekly-report' },
+  { label: '运营中心', description: '任务、连接、团队与试点', to: '/operations' },
   { label: '工具中心', description: '查看可用工具', to: '/tools' },
   { label: '系统状态', description: '查看服务运行情况', to: '/status' },
   { label: '设置', description: '工作区偏好', to: '/settings' },
@@ -142,7 +144,7 @@ onBeforeUnmount(() => {
     <div class="top-actions">
       <button class="icon-button mobile-search" type="button" aria-label="打开全局搜索" @click="openPalette"><Search :size="18" /></button>
       <span class="service-status" :class="serviceStatus"><i></i>{{ serviceStatus === 'online' ? '服务正常' : serviceStatus === 'offline' ? '服务离线' : '正在检查' }}</span>
-      <button class="icon-button" type="button" aria-label="通知">
+      <button class="icon-button" type="button" aria-label="打开任务中心" @click="router.push('/operations')">
         <Bell :size="18" />
         <span class="notification-dot"></span>
       </button>

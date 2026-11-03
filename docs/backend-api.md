@@ -69,6 +69,32 @@
 
 周报生成响应包含 `review.conflicts`、`review.missing` 和 `review.calculations`。每项确定性计算均包含输入、公式、结果、单位和来源；资料冲突保留所有值，不由服务端擅自裁决。
 
+## 后台任务中心
+
+- `POST /tasks/weekly-report`：提交持久化周报任务。
+- `GET /tasks`、`GET /tasks/{id}`：列出或查看任务；管理员看到工作区任务，普通成员只看到自己的任务。
+- `POST /tasks/{id}/cancel`、`POST /tasks/{id}/retry`：取消执行中的任务或重试失败/取消任务。
+- `POST /tasks/connections/{id}/sync`：提交办公连接同步检查。
+
+任务状态为 `queued`、`running`、`succeeded`、`failed` 或 `canceled`，并返回 `progress`、`message`、`result` 和 `error`。服务重启会把未完成任务标记为可重试的失败状态。
+
+## 办公平台连接
+
+- `GET /connections/providers`、`GET /connections`：平台目录和工作区连接。
+- `POST /connections`、`PATCH /connections/{id}`、`DELETE /connections/{id}`：管理员管理连接。
+- `POST /connections/{id}/test`：验证凭证引用和配置完整性。
+
+除手动上传外，`credential_ref` 只能使用 `env:NAME`、`vault:path` 或 `secret:name`，数据库不接受明文令牌。配置验证不等同于伪造远端文件同步；真实导入需要部署环境完成平台授权。
+
+## 团队与试点
+
+- `GET /team/me`：当前成员及角色。
+- `GET /team/members`、`POST /team/members`、`PATCH /team/members/{userId}`、`DELETE /team/members/{userId}`：管理员管理成员。
+- `POST /pilot/events`：记录周报完成时间、修改量、事实错误、复用、导出和反馈事件。
+- `GET /pilot/dashboard`：管理员试点指标面板。
+
+角色为 `owner`、`admin`、`editor` 和 `viewer`。写权限由服务端过滤器统一执行；隐藏前端按钮不构成权限控制。
+
 ## MCP 工具
 
 - `POST /tools/mcp`：注册。

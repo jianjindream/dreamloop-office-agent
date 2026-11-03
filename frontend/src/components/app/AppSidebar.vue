@@ -2,6 +2,7 @@
 import {
   Activity,
   Blocks,
+  BriefcaseBusiness,
   ChevronDown,
   Files,
   LibraryBig,
@@ -29,6 +30,7 @@ const navigation = [
   { label: '知识库', to: '/knowledge', icon: LibraryBig },
   { label: '文档', to: '/documents', icon: Files },
   { label: '项目周报', to: '/weekly-report', icon: NotebookPen },
+  { label: '运营中心', to: '/operations', icon: BriefcaseBusiness },
   { label: '工具中心', to: '/tools', icon: Blocks },
   { label: '系统状态', to: '/status', icon: Activity },
 ]

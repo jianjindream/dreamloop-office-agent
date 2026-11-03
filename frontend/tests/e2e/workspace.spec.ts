@@ -8,6 +8,13 @@ const mockCommonApi = async (page: Page) => {
   await page.route('**/api/status', (route) => route.fulfill({ json: { rag_loaded: false, rag_mode: 'mock', tools_count: 0, llm_model: 'mock', embedding_model: 'mock', is_mock: true, infrastructure: {} } }))
   await page.route('**/api/tools', (route) => route.fulfill({ json: [] }))
   await page.route('**/api/documents', (route) => route.fulfill({ json: [] }))
+  await page.route('**/api/team/me', (route) => route.fulfill({ json: { workspaceId: 'default', userId: 'test-user', displayName: 'Test', email: '', role: 'owner', status: 'active', invitedBy: 'test-user', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), administrator: true, editor: true } }))
+  await page.route('**/api/tasks', (route) => route.fulfill({ json: [] }))
+  await page.route('**/api/connections/providers', (route) => route.fulfill({ json: [] }))
+  await page.route('**/api/connections', (route) => route.fulfill({ json: [] }))
+  await page.route('**/api/team/members', (route) => route.fulfill({ json: [] }))
+  await page.route('**/api/pilot/dashboard', (route) => route.fulfill({ json: { generatedReports: 0, completedReports: 0, exportedReports: 0, averageCompletionSeconds: 0, averageEditCount: 0, factErrorRate: 0, reuseRate: 0, averageRating: 0, feedbackCount: 0, recentComments: [] } }))
+  await page.route('**/api/weekly-report/templates', (route) => route.fulfill({ json: [{ id: 'builtin-weekly-report', name: '标准项目周报', description: '', builtIn: true, contentMd: '' }] }))
 }
 
 test.beforeEach(async ({ page }) => {
@@ -59,7 +66,7 @@ test('chat answer becomes an editable document draft', async ({ page }) => {
 })
 
 test('all workspace pages fit the viewport', async ({ page }) => {
-  for (const path of ['/chat', '/knowledge', '/documents', '/tools', '/status', '/settings']) {
+  for (const path of ['/chat', '/knowledge', '/documents', '/weekly-report', '/operations', '/tools', '/status', '/settings']) {
     await page.goto(path)
     await expect(page.locator('main')).toBeVisible()
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)

@@ -20,6 +20,11 @@ import type {
   WeeklyReportTemplate,
   WeeklyReportResult,
   ReviewDiff,
+  WorkspaceMember,
+  ConnectionProvider,
+  OfficeConnection,
+  OfficeTask,
+  PilotDashboard,
 } from '@/types/api'
 
 interface StreamOptions {
@@ -122,6 +127,19 @@ export const agentApi = {
     user_facts?: string
     save_draft?: boolean
   }) => request<WeeklyReportResult>('/api/weekly-report/generate', { method: 'POST', body: JSON.stringify(payload) }),
+  submitWeeklyReport: (payload: {
+    project_name: string
+    period_start: string
+    period_end: string
+    template_id: string
+    document_ids: string[]
+    user_facts?: string
+    save_draft?: boolean
+  }) => request<OfficeTask>('/api/tasks/weekly-report', { method: 'POST', body: JSON.stringify(payload) }),
+  tasks: () => request<OfficeTask[]>('/api/tasks'),
+  task: (id: string) => request<OfficeTask>(`/api/tasks/${encodeURIComponent(id)}`),
+  cancelOfficeTask: (id: string) => request<OfficeTask>(`/api/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  retryOfficeTask: (id: string) => request<OfficeTask>(`/api/tasks/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
   compareWeeklyReport: (originalContent: string, revisedContent: string) =>
     request<ReviewDiff>('/api/weekly-report/compare', {
       method: 'POST', body: JSON.stringify({ original_content: originalContent, revised_content: revisedContent }),
@@ -136,6 +154,25 @@ export const agentApi = {
     }
     return response.blob()
   },
+  teamMe: () => request<WorkspaceMember>('/api/team/me'),
+  teamMembers: () => request<WorkspaceMember[]>('/api/team/members'),
+  inviteMember: (payload: { user_id: string; display_name: string; email: string; role: WorkspaceMember['role'] }) =>
+    request<WorkspaceMember>('/api/team/members', { method: 'POST', body: JSON.stringify(payload) }),
+  updateMember: (userId: string, payload: { role: WorkspaceMember['role']; status: WorkspaceMember['status'] }) =>
+    request<WorkspaceMember>(`/api/team/members/${encodeURIComponent(userId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  removeMember: (userId: string) => request<ApiOperationResult>(`/api/team/members/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
+  connectionProviders: () => request<ConnectionProvider[]>('/api/connections/providers'),
+  connections: () => request<OfficeConnection[]>('/api/connections'),
+  createConnection: (payload: { provider: string; display_name: string; credential_ref: string; config: Record<string, unknown> }) =>
+    request<OfficeConnection>('/api/connections', { method: 'POST', body: JSON.stringify(payload) }),
+  testConnection: (id: string) => request<{ status: string; message: string; capabilities: string[] }>(`/api/connections/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  syncConnection: (id: string) => request<OfficeTask>(`/api/tasks/connections/${encodeURIComponent(id)}/sync`, { method: 'POST' }),
+  deleteConnection: (id: string) => request<ApiOperationResult>(`/api/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  pilotDashboard: () => request<PilotDashboard>('/api/pilot/dashboard'),
+  recordPilotEvent: (payload: {
+    eventType: string; reportId?: string; durationMs?: number; editCount?: number; factErrors?: number;
+    reusedPrior?: boolean; rating?: number; comment?: string; metadata?: Record<string, unknown>
+  }) => request<ApiOperationResult>('/api/pilot/events', { method: 'POST', body: JSON.stringify(payload) }),
   sessions: (query = '') => request<ServerSession[]>(query ? `/api/sessions?q=${encodeURIComponent(query)}` : '/api/sessions'),
   sessionMessages: (id: string, afterId = 0, limit = 500) =>
     request<ServerMessage[]>(`/api/sessions/${encodeURIComponent(id)}/messages?after_id=${afterId}&limit=${limit}`),
