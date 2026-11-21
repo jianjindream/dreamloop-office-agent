@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.List;
 import java.util.Map;
@@ -24,11 +25,15 @@ public class DocumentLibraryService {
 
     private final LibraryRepo repo;
     private final RagService rag;
+    private DocumentAccessService access;
 
     public DocumentLibraryService(LibraryRepo repo, @Lazy RagService rag) {
         this.repo = repo;
         this.rag = rag;
     }
+
+    @Autowired(required = false)
+    public void setDocumentAccess(DocumentAccessService access) { this.access = access; }
 
     /** 暴露 repo 给 sub-agents（避免它们直接持有 repo）。 */
     public LibraryRepo repo() { return repo; }
@@ -85,11 +90,14 @@ public class DocumentLibraryService {
         Map<String, CitationTarget> resolved = new LinkedHashMap<>();
         if (remaining.isEmpty()) return resolved;
         for (Document document : repo.list()) {
+            boolean readable = access == null
+                    ? true : access.canRead(DocumentAccessService.identity(ownerKey), document);
+            if (!readable) continue;
             for (DocumentVersion version : repo.listVersions(document.getId())) {
                 Object owner = version.getMetadata().get("owner_key");
                 Object hash = version.getMetadata().get("doc_hash");
                 String value = String.valueOf(hash);
-                boolean owned = ownerKey.equals(String.valueOf(owner)) || (owner == null && "default:default".equals(ownerKey));
+                boolean owned = access != null || ownerKey.equals(String.valueOf(owner)) || (owner == null && "default:default".equals(ownerKey));
                 if (remaining.contains(value) && owned) {
                     resolved.put(value, new CitationTarget(document.getId(), document.getTitle(), version.getId(), version.getVersion()));
                     remaining.remove(value);

@@ -77,6 +77,20 @@ public class WorkspaceAccessService {
         });
     }
 
+    /** Active member directory used when a document owner chooses share recipients. */
+    public List<Member> directory() {
+        Member actor = current();
+        return database.transaction(connection -> {
+            List<Member> result = new ArrayList<>();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT * FROM workspace_members WHERE workspace_id=? AND status='active' ORDER BY display_name,user_id")) {
+                ps.setString(1, actor.workspaceId());
+                try (ResultSet rs = ps.executeQuery()) { while (rs.next()) result.add(read(rs)); }
+            }
+            return result;
+        });
+    }
+
     public Member invite(String userId, String displayName, String email, String role) {
         Member actor = requireAdministrator();
         String normalizedUser = requiredId(userId);

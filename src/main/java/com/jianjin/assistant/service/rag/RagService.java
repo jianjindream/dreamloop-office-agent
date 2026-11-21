@@ -12,6 +12,7 @@ import com.jianjin.assistant.model.Chunk;
 import com.jianjin.assistant.service.graph.ChunkRef;
 import com.jianjin.assistant.service.graph.KGStore;
 import com.jianjin.assistant.service.memory.LongTermMemory;
+import com.jianjin.assistant.service.document.DocumentAccessService;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +51,7 @@ public class RagService {
     private Rewriter rewriter;
     private Reranker reranker;
     private RagTenantRepository tenantRepository;
+    private DocumentAccessService documentAccess;
     private final ExecutorService expansionExecutor;
     private final ExecutorService graphIndexExecutor;
 
@@ -96,6 +98,8 @@ public class RagService {
     public void setReranker(Reranker r) { this.reranker = r; }
     @Autowired(required = false)
     public void setTenantRepository(RagTenantRepository tenantRepository) { this.tenantRepository = tenantRepository; }
+    @Autowired(required = false)
+    public void setDocumentAccess(DocumentAccessService documentAccess) { this.documentAccess = documentAccess; }
 
     public boolean isLoaded() { return loaded; }
     public String getMode() { return store.getMode(); }
@@ -124,7 +128,9 @@ public class RagService {
         }
         if (tenantRepository != null) {
             try {
-                tenantRepository.assign(indexed.docHash, ownerKey);
+                String documentId = sourceKey == null || sourceKey.isBlank() ? null
+                        : sourceKey.substring(0, sourceKey.indexOf(':') > 0 ? sourceKey.indexOf(':') : sourceKey.length());
+                tenantRepository.assign(indexed.docHash, ownerKey, documentId);
             } catch (RuntimeException e) {
                 store.delete(indexed.docHash);
                 throw e;
@@ -237,8 +243,10 @@ public class RagService {
                 : rewriter.rewritePrimary(question, safeHistory);
         if (primary.text().isBlank()) primary = new QuerySpec(question, QueryType.PRIMARY);
         trace.primaryQuery = primary.text();
-        Set<String> ownerHashes = ownerKey == null || tenantRepository == null
-                ? null : tenantRepository.documentHashes(ownerKey);
+        Set<String> ownerHashes = ownerKey == null || tenantRepository == null && documentAccess == null
+                ? null : new LinkedHashSet<>();
+        if (ownerHashes != null && tenantRepository != null) ownerHashes.addAll(tenantRepository.documentHashes(ownerKey));
+        if (ownerHashes != null && documentAccess != null) ownerHashes.addAll(documentAccess.readableDocumentHashes(ownerKey));
         Set<String> allowedDocHashes = selectedDocHashes == null
                 ? (ownerHashes == null ? null : new LinkedHashSet<>(ownerHashes))
                 : new LinkedHashSet<>(selectedDocHashes);
@@ -247,7 +255,7 @@ public class RagService {
         // Keep a bounded parent candidate pool for source RRF, query RRF and optional reranking.
         // HybridStore retrieves four child chunks per requested parent, so the default is 48 -> 12 -> 3.
         int fetchK = Math.max(cfg.getRag().getTopK(), cfg.getRag().getCandidateParentK());
-        List<HybridStore.SearchResult> primaryHits = filterOwned(ownerKey,
+        List<HybridStore.SearchResult> primaryHits = filterAllowed(ownerKey, allowedDocHashes,
                 searchStore(primary.text(), fetchK, allowedDocHashes));
         List<ScoredChunk> results = toScored(primaryHits);
         trace.primaryRetrievalCandidates = copy(results);
@@ -262,7 +270,7 @@ public class RagService {
         // Fall back whenever the external stores yield nothing. A backend can be
         // connected while its index is empty, rebuilding, or temporarily failing.
         if (results.isEmpty()) {
-            results = filterOwnedScored(ownerKey, tfSearch(question, fetchK, allowedDocHashes));
+            results = filterAllowedScored(ownerKey, allowedDocHashes, tfSearch(question, fetchK, allowedDocHashes));
             trace.fallbackUsed = true;
         }
         if (results.isEmpty()) {
@@ -319,18 +327,29 @@ public class RagService {
                 : mergePrimaryAndVariants(primary, primaryHits, variants, topK, null, null);
     }
 
-    private List<HybridStore.SearchResult> filterOwned(String ownerKey, List<HybridStore.SearchResult> results) {
-        if (ownerKey == null || tenantRepository == null || results == null || results.isEmpty()) return results;
-        Set<Long> allowed = tenantRepository.allowedContexts(ownerKey,
-                results.stream().map(item -> item.contextId).toList());
-        return results.stream().filter(item -> allowed.contains(item.contextId)).toList();
+    private List<HybridStore.SearchResult> filterAllowed(String ownerKey, Set<String> allowedHashes,
+                                                          List<HybridStore.SearchResult> results) {
+        if (results == null || results.isEmpty()) return results;
+        if (allowedHashes != null) {
+            List<HybridStore.SearchResult> known = results.stream()
+                    .filter(item -> item.docHash != null && allowedHashes.contains(item.docHash)).toList();
+            if (known.size() == results.size() || results.stream().allMatch(item -> item.docHash != null)) return known;
+        }
+        if (ownerKey == null || tenantRepository == null) return allowedHashes == null ? results : List.of();
+        Set<Long> allowed = tenantRepository.allowedContexts(ownerKey, results.stream().map(item -> item.contextId).toList());
+        return results.stream().filter(item -> (item.docHash != null && allowedHashes != null && allowedHashes.contains(item.docHash))
+                || allowed.contains(item.contextId)).toList();
     }
 
-    private List<ScoredChunk> filterOwnedScored(String ownerKey, List<ScoredChunk> results) {
-        if (ownerKey == null || tenantRepository == null || results == null || results.isEmpty()) return results;
-        Set<Long> allowed = tenantRepository.allowedContexts(ownerKey,
-                results.stream().map(item -> item.contextId).toList());
-        return results.stream().filter(item -> allowed.contains(item.contextId)).toList();
+    private List<ScoredChunk> filterAllowedScored(String ownerKey, Set<String> allowedHashes, List<ScoredChunk> results) {
+        if (results == null || results.isEmpty()) return results;
+        if (allowedHashes != null && results.stream().allMatch(item -> item.docHash != null)) {
+            return results.stream().filter(item -> allowedHashes.contains(item.docHash)).toList();
+        }
+        if (ownerKey == null || tenantRepository == null) return allowedHashes == null ? results : List.of();
+        Set<Long> allowed = tenantRepository.allowedContexts(ownerKey, results.stream().map(item -> item.contextId).toList());
+        return results.stream().filter(item -> (item.docHash != null && allowedHashes != null && allowedHashes.contains(item.docHash))
+                || allowed.contains(item.contextId)).toList();
     }
 
     private boolean shouldExpand(List<HybridStore.SearchResult> primaryHits) {
@@ -355,7 +374,7 @@ public class RagService {
         for (QuerySpec variant : variants) {
             futures.add(CompletableFuture.supplyAsync(() -> {
                 try {
-                    return new QueryHits(variant, filterOwned(ownerKey,
+                    return new QueryHits(variant, filterAllowed(ownerKey, allowedDocHashes,
                             searchStore(variant.text(), topK, allowedDocHashes)));
                 } catch (Exception e) {
                     log.warn("Expanded query search failed; skipping variant: {}", e.getMessage());
@@ -462,6 +481,13 @@ public class RagService {
             chunks.add(new Chunk(i, rows.get(i).content));
         }
         return chunks;
+    }
+
+    /** Count only authorized chunks; never returns chunk text. */
+    public long countChunks(Set<String> allowedDocHashes) {
+        if (allowedDocHashes != null && allowedDocHashes.isEmpty()) return 0;
+        return infra.loadAllRAGChunks().stream()
+                .filter(row -> allowedDocHashes == null || allowedDocHashes.contains(row.docHash)).count();
     }
 
     /** Stable parent IDs intended for building RAG evaluation golden datasets. */

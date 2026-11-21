@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Clock3, FilePlus2, FileText, LayoutGrid, List, Plus, RefreshCw, Search, Sparkles, Trash2, Undo2 } from 'lucide-vue-next'
+import { Clock3, FilePlus2, FileText, LayoutGrid, List, Plus, RefreshCw, Search, Share2, Sparkles, Trash2, Undo2, X } from 'lucide-vue-next'
 import { agentApi } from '@/api/agent'
 import { useDocumentCanvasStore } from '@/stores/documentCanvas'
-import type { DocumentSummary } from '@/types/api'
+import type { DocumentPermissionEntry, DocumentPermissionView, DocumentSummary, WorkspaceDirectoryMember } from '@/types/api'
 
 const canvas = useDocumentCanvasStore()
 const documents = ref<DocumentSummary[]>([])
@@ -12,6 +12,13 @@ const error = ref('')
 const query = ref('')
 const view = ref<'grid' | 'list'>('grid')
 const showTrash = ref(false)
+const shareDocument = ref<DocumentSummary | null>(null)
+const shareVisibility = ref<DocumentPermissionView['visibility']>('private')
+const shareEntries = ref<DocumentPermissionEntry[]>([])
+const directory = ref<WorkspaceDirectoryMember[]>([])
+const shareLoading = ref(false)
+const shareSaving = ref(false)
+const shareError = ref('')
 const filteredDocuments = computed(() => documents.value.filter((doc) =>
   doc.title.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase())))
 
@@ -49,6 +56,41 @@ const removeDocument = async (doc: DocumentSummary) => {
 const restoreDocument = async (doc: DocumentSummary) => {
   try { await agentApi.restoreDocument(doc.id); await loadDocuments() }
   catch (caught) { error.value = caught instanceof Error ? caught.message : '恢复失败' }
+}
+const sharedPermission = (userId: string) => shareEntries.value.find((entry) =>
+  entry.principalType === 'user' && entry.principalId === userId && entry.effect === 'allow')?.permission
+const toggleSharedUser = (userId: string) => {
+  const index = shareEntries.value.findIndex((entry) => entry.principalType === 'user' && entry.principalId === userId && entry.effect === 'allow')
+  shareEntries.value = shareEntries.value.filter((entry) => entry.principalType !== 'user' || entry.principalId !== userId)
+  if (index < 0) shareEntries.value.push({ principalType: 'user', principalId: userId, permission: 'read', effect: 'allow' })
+}
+const setSharedPermission = (userId: string, permission: DocumentPermissionEntry['permission']) => {
+  const entry = shareEntries.value.find((item) => item.principalType === 'user' && item.principalId === userId && item.effect === 'allow')
+  if (entry) entry.permission = permission
+}
+const openSharing = async (doc: DocumentSummary) => {
+  shareDocument.value = doc
+  shareLoading.value = true
+  shareError.value = ''
+  try {
+    const [permissions, members] = await Promise.all([agentApi.documentPermissions(doc.id), agentApi.teamDirectory()])
+    shareVisibility.value = permissions.visibility
+    shareEntries.value = permissions.entries.map((entry) => ({ ...entry }))
+    directory.value = members.filter((member) => member.status === 'active' && member.userId !== doc.ownerUserId)
+  } catch (caught) {
+    shareError.value = caught instanceof Error ? caught.message : '加载共享设置失败'
+  } finally { shareLoading.value = false }
+}
+const saveSharing = async () => {
+  if (!shareDocument.value) return
+  shareSaving.value = true
+  shareError.value = ''
+  try {
+    await agentApi.updateDocumentPermissions(shareDocument.value.id, shareVisibility.value, shareEntries.value)
+    shareDocument.value = null
+    await loadDocuments()
+  } catch (caught) { shareError.value = caught instanceof Error ? caught.message : '保存共享设置失败' }
+  finally { shareSaving.value = false }
 }
 watch(showTrash, loadDocuments)
 
@@ -99,17 +141,36 @@ onMounted(loadDocuments)
           <div class="document-meta"><span><Clock3 :size="12" />{{ dateLabel(doc.updatedAt) }}</span><span>版本 {{ doc.latestVersion || 1 }}</span></div>
         </div>
         </button>
-        <div class="document-actions"><button v-if="showTrash" type="button" :aria-label="`恢复 ${doc.title}`" @click="restoreDocument(doc)"><Undo2 :size="13" />恢复文档</button><button v-else type="button" :aria-label="`删除 ${doc.title}`" @click="removeDocument(doc)"><Trash2 :size="13" />移入回收站</button></div>
+        <div class="document-actions"><button v-if="showTrash" type="button" :aria-label="`恢复 ${doc.title}`" @click="restoreDocument(doc)"><Undo2 :size="13" />恢复文档</button><template v-else><button v-if="doc.canManage" type="button" :aria-label="`共享 ${doc.title}`" @click="openSharing(doc)"><Share2 :size="13" />共享</button><button v-if="doc.canManage" type="button" :aria-label="`删除 ${doc.title}`" @click="removeDocument(doc)"><Trash2 :size="13" />移入回收站</button></template></div>
       </article>
     </section>
     <div v-if="!loading && !error && query && filteredDocuments.length === 0" class="documents-message">没有找到匹配“{{ query }}”的文档。</div>
+
+    <div v-if="shareDocument" class="share-backdrop" @click.self="shareDocument = null">
+      <section class="share-dialog" role="dialog" aria-modal="true" aria-label="文档共享设置">
+        <header><div><h2>共享“{{ shareDocument.title }}”</h2><p>权限变更会立即影响文档查看、附件下载和 RAG 检索。</p></div><button type="button" aria-label="关闭" @click="shareDocument = null"><X :size="17" /></button></header>
+        <div v-if="shareLoading" class="share-state">正在加载共享设置…</div>
+        <template v-else>
+          <label class="visibility-field"><span>可见范围</span><select v-model="shareVisibility"><option value="private">仅自己</option><option value="workspace">工作区所有成员</option><option value="restricted">指定成员</option></select></label>
+          <div v-if="shareVisibility === 'restricted'" class="member-list">
+            <div v-for="member in directory" :key="member.userId" class="member-row">
+              <label><input type="checkbox" :checked="Boolean(sharedPermission(member.userId))" @change="toggleSharedUser(member.userId)" /><span><strong>{{ member.displayName || member.userId }}</strong><small>{{ member.userId }} · {{ member.role }}</small></span></label>
+              <select v-if="sharedPermission(member.userId)" :value="sharedPermission(member.userId)" @change="setSharedPermission(member.userId, ($event.target as HTMLSelectElement).value as DocumentPermissionEntry['permission'])"><option value="read">可查看</option><option value="write">可编辑</option><option value="manage">可管理</option></select>
+            </div>
+            <p v-if="!directory.length" class="share-state">工作区暂无其他有效成员。</p>
+          </div>
+          <p v-if="shareError" class="share-error">{{ shareError }}</p>
+          <footer><button class="secondary-button" type="button" @click="shareDocument = null">取消</button><button class="primary-button" type="button" :disabled="shareSaving" @click="saveSharing">{{ shareSaving ? '保存中…' : '保存权限' }}</button></footer>
+        </template>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .document-open { width:100%; padding:0; border:0; background:transparent; text-align:left; cursor:pointer; }
 .document-open:disabled { cursor:default; }
-.document-actions { display:flex; padding:0 14px 12px; justify-content:flex-end; }
+.document-actions { display:flex; gap:6px; padding:0 14px 12px; justify-content:flex-end; }
 .document-actions button { display:flex; align-items:center; gap:4px; padding:5px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg-elevated); color:var(--text-muted); font-size:10px; cursor:pointer; }
 .list-view .document-open { display:flex; flex:1; min-width:0; width:auto; align-items:center; }
 .list-view .document-actions { flex:0 0 auto; padding:8px; }
@@ -161,6 +222,7 @@ onMounted(loadDocuments)
 .completion > span { height: 3px; flex: 1; overflow: hidden; border-radius: 99px; background: var(--bg-hover); }
 .completion i { display: block; height: 100%; border-radius: inherit; background: var(--brand); }
 .completion small { color: var(--text-faint); font-size: 7px; }
+.share-backdrop{position:fixed;z-index:80;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(20,22,42,.34);backdrop-filter:blur(3px)}.share-dialog{width:min(520px,100%);max-height:80vh;overflow:auto;padding:20px;border:1px solid var(--border);border-radius:16px;background:var(--bg-elevated);box-shadow:var(--shadow-lg)}.share-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.share-dialog h2{margin:0;color:var(--text-strong);font-size:16px}.share-dialog p{margin:5px 0 0;color:var(--text-muted);font-size:10px}.share-dialog>header button{display:inline-flex;padding:5px;border:0;background:transparent;color:var(--text-muted);cursor:pointer}.visibility-field{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-top:20px;padding:13px;border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:11px}.visibility-field select,.member-row select{padding:7px;border:1px solid var(--border);border-radius:7px;background:var(--bg-elevated);color:var(--text);font-size:10px}.member-list{margin-top:12px;border:1px solid var(--border);border-radius:10px}.member-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px;border-bottom:1px solid var(--border)}.member-row:last-child{border-bottom:0}.member-row label{display:flex;align-items:center;gap:9px}.member-row label span{display:flex;flex-direction:column}.member-row strong{color:var(--text);font-size:10px}.member-row small{margin-top:2px;color:var(--text-faint);font-size:8px}.share-dialog>footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.share-state{padding:22px;text-align:center;color:var(--text-muted);font-size:10px}.share-error{color:var(--danger)!important}
 @media (max-width: 940px) { .document-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 650px) { .template-banner { align-items: flex-start; flex-wrap: wrap; gap:12px; padding:18px; } .template-banner > div:nth-child(2) { flex-basis:calc(100% - 68px); } .template-banner h2{font-size:14px}.template-banner p{font-size:10px;line-height:1.5}.template-banner button { margin-left: 64px; } .documents-toolbar { align-items: flex-start; flex-direction: column; } .document-grid { grid-template-columns: 1fr; } }
 </style>

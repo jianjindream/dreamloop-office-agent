@@ -47,6 +47,10 @@ public class InMemoryLibraryRepo implements LibraryRepo {
                 doc.setCreatedBy(req.getCreatedBy());
                 doc.setCreatedAt(now);
                 doc.setUpdatedAt(now);
+                doc.setWorkspaceId(req.getWorkspaceId());
+                doc.setOwnerUserId(req.getOwnerUserId());
+                doc.setVisibility(req.getVisibility());
+                doc.setPermissionVersion(1);
                 docs.put(docId, doc);
                 versions.put(docId, new ArrayList<>());
                 versionNo = 1;
@@ -190,6 +194,12 @@ public class InMemoryLibraryRepo implements LibraryRepo {
         c.setUpdatedAt(d.getUpdatedAt());
         c.setLatestVersion(d.getLatestVersion());
         c.setLatestVersionId(d.getLatestVersionId());
+        c.setWorkspaceId(d.getWorkspaceId());
+        c.setOwnerUserId(d.getOwnerUserId());
+        c.setVisibility(d.getVisibility());
+        c.setPermissionVersion(d.getPermissionVersion());
+        c.setAccessLevel(d.getAccessLevel());
+        c.setCanManage(d.isCanManage());
         return c;
     }
 

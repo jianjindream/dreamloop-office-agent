@@ -27,8 +27,7 @@ public class WorkspaceAuthorizationFilter extends OncePerRequestFilter {
     public WorkspaceAuthorizationFilter(WorkspaceAccessService access, ObjectMapper mapper) { this.access = access; this.mapper = mapper; }
 
     @Override protected boolean shouldNotFilter(HttpServletRequest request) {
-        return "OPTIONS".equalsIgnoreCase(request.getMethod()) || !request.getRequestURI().startsWith("/api/")
-                || "/api/status".equals(request.getRequestURI());
+        return "OPTIONS".equalsIgnoreCase(request.getMethod()) || !request.getRequestURI().startsWith("/api/");
     }
 
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)

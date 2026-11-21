@@ -6,6 +6,7 @@ import com.jianjin.assistant.domain.document.WriteRequest;
 import com.jianjin.assistant.model.Tool;
 import com.jianjin.assistant.service.agent.UnifiedAgentService;
 import com.jianjin.assistant.service.document.DocumentLibraryService;
+import com.jianjin.assistant.service.document.DocumentAccessService;
 import com.jianjin.assistant.service.llm.LlmService;
 import com.jianjin.assistant.service.rag.RagService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -189,6 +190,9 @@ public final class BuiltinSubAgents {
             WriteRequest req = new WriteRequest(
                     title, "report", Document.SOURCE_AGENT, name(),
                     content, SubAgentSupport.firstRunes(content, 180), buildMetadata(task));
+            var identity = DocumentAccessService.identity(task.ownerKey);
+            req.setWorkspaceId(identity.workspaceId()); req.setOwnerUserId(identity.userId());
+            req.setVisibility(Document.VISIBILITY_PRIVATE);
             DocumentLibraryService.Result res = library.writeDocument(req, true);
 
             Map<String, Object> out = new LinkedHashMap<>();

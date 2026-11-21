@@ -18,11 +18,16 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/team")
 public class WorkspaceTeamController {
+    public record DirectoryMember(String userId, String displayName, String role, String status) { }
     private final WorkspaceAccessService access;
     public WorkspaceTeamController(WorkspaceAccessService access) { this.access = access; }
 
     @GetMapping("/me") public WorkspaceAccessService.Member me() { return access.current(); }
     @GetMapping("/members") public List<WorkspaceAccessService.Member> members() { return access.list(); }
+    @GetMapping("/directory") public List<DirectoryMember> directory() {
+        return access.directory().stream().map(member ->
+                new DirectoryMember(member.userId(), member.displayName(), member.role(), member.status())).toList();
+    }
 
     @PostMapping("/members")
     public WorkspaceAccessService.Member invite(@RequestBody Map<String, Object> request) {

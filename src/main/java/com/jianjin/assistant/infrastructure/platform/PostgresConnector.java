@@ -98,8 +98,12 @@ public class PostgresConnector {
                 """
                 CREATE TABLE IF NOT EXISTS rag_documents (
                     doc_hash TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+                    document_id TEXT, workspace_id TEXT,
                     created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())""",
+                "ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS document_id TEXT",
+                "ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS workspace_id TEXT",
                 "CREATE INDEX IF NOT EXISTS idx_rag_documents_owner ON rag_documents(owner_key, doc_hash)",
+                "CREATE INDEX IF NOT EXISTS idx_rag_documents_document ON rag_documents(workspace_id, document_id, doc_hash)",
                 """
                 CREATE TABLE IF NOT EXISTS rag_eval_datasets (
                     id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL,

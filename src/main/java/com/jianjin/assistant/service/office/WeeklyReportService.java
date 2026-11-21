@@ -6,6 +6,8 @@ import com.jianjin.assistant.domain.document.DocumentVersion;
 import com.jianjin.assistant.domain.document.LibraryRepo;
 import com.jianjin.assistant.domain.document.WriteRequest;
 import com.jianjin.assistant.service.document.DocumentLibraryService;
+import com.jianjin.assistant.service.document.DocumentAccessService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -35,8 +37,12 @@ public class WeeklyReportService {
     private static final Pattern NOTIFICATION_DUE = Pattern.compile("(?:通知联调|完成通知联调)[^。；\\n]*?(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*日");
 
     private final DocumentLibraryService library;
+    private DocumentAccessService access;
 
     public WeeklyReportService(DocumentLibraryService library) { this.library = library; }
+
+    @Autowired(required = false)
+    public void setDocumentAccess(DocumentAccessService access) { this.access = access; }
 
     public record GenerateRequest(
             @JsonProperty("project_name") String projectName,
@@ -78,8 +84,11 @@ public class WeeklyReportService {
         metadata.put("source_document_ids", request.documentIds());
         metadata.put("review", extraction.review());
         String title = request.projectName().trim() + "项目周报 " + request.periodEnd();
-        WriteRequest write = new WriteRequest(title, REPORT_TYPE, Document.SOURCE_AGENT, ownerKey,
+        var identity = DocumentAccessService.identity(ownerKey);
+        WriteRequest write = new WriteRequest(title, REPORT_TYPE, Document.SOURCE_AGENT, identity.userId(),
                 content, extraction.summary(), metadata);
+        write.setWorkspaceId(identity.workspaceId()); write.setOwnerUserId(identity.userId());
+        write.setVisibility(Document.VISIBILITY_PRIVATE);
         write.setStatus(Boolean.FALSE.equals(request.saveDraft()) ? Document.STATUS_ACTIVE : "draft");
         DocumentLibraryService.Result saved = library.writeDocument(write, false);
         List<Source> sources = inputs.stream().map(value -> new Source(value.sourceId(), value.document().getId(),
@@ -95,7 +104,7 @@ public class WeeklyReportService {
         for (Document document : library.list()) {
             if (!TEMPLATE_TYPE.equals(document.getDocType())) continue;
             LibraryRepo.DocumentWithVersion value = library.get(document.getId());
-            if (owned(ownerKey, value.version)) result.add(new Template(document.getId(), document.getTitle(),
+            if (readable(ownerKey, value)) result.add(new Template(document.getId(), document.getTitle(),
                     value.version.getSummary(), false, value.version.getContentMd()));
         }
         return result;
@@ -107,8 +116,11 @@ public class WeeklyReportService {
         }
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("owner_key", ownerKey);
-        WriteRequest write = new WriteRequest(name.trim(), TEMPLATE_TYPE, Document.SOURCE_UPLOAD, ownerKey,
+        var identity = DocumentAccessService.identity(ownerKey);
+        WriteRequest write = new WriteRequest(name.trim(), TEMPLATE_TYPE, Document.SOURCE_UPLOAD, identity.userId(),
                 content.trim(), description == null ? "" : description.trim(), metadata);
+        write.setWorkspaceId(identity.workspaceId()); write.setOwnerUserId(identity.userId());
+        write.setVisibility(Document.VISIBILITY_PRIVATE);
         DocumentLibraryService.Result result = library.writeDocument(write, false);
         return new Template(result.document.getId(), result.document.getTitle(), result.version.getSummary(),
                 false, result.version.getContentMd());
@@ -143,7 +155,7 @@ public class WeeklyReportService {
         int index = 1;
         for (String id : unique) {
             LibraryRepo.DocumentWithVersion value = library.get(id);
-            if (!owned(ownerKey, value.version) || "deleted".equals(value.document.getStatus())) {
+            if (!readable(ownerKey, value) || "deleted".equals(value.document.getStatus())) {
                 throw new IllegalArgumentException("资料不存在或无权访问: " + id);
             }
             if (TEMPLATE_TYPE.equals(value.document.getDocType())) throw new IllegalArgumentException("模板不能作为事实资料: " + id);
@@ -155,7 +167,7 @@ public class WeeklyReportService {
     private String resolveTemplate(String ownerKey, String templateId) {
         if (DEFAULT_TEMPLATE_ID.equals(templateId)) return defaultTemplate().contentMd();
         LibraryRepo.DocumentWithVersion value = library.get(templateId);
-        if (!TEMPLATE_TYPE.equals(value.document.getDocType()) || !owned(ownerKey, value.version)) {
+        if (!TEMPLATE_TYPE.equals(value.document.getDocType()) || !readable(ownerKey, value)) {
             throw new IllegalArgumentException("模板不存在或无权访问");
         }
         return value.version.getContentMd();
@@ -164,6 +176,11 @@ public class WeeklyReportService {
     private boolean owned(String ownerKey, DocumentVersion version) {
         Object owner = version.getMetadata().get("owner_key");
         return ownerKey.equals(String.valueOf(owner)) || (owner == null && "default:default".equals(ownerKey));
+    }
+
+    private boolean readable(String ownerKey, LibraryRepo.DocumentWithVersion value) {
+        return access == null ? owned(ownerKey, value.version)
+                : access.canRead(DocumentAccessService.identity(ownerKey), value.document);
     }
 
     private Extraction extract(List<Input> inputs, LocalDate start, LocalDate end) {

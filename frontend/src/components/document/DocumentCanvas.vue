@@ -32,12 +32,12 @@ const aiLabels: Record<AiAction, string> = { rewrite: '改写', expand: '扩写'
 const wordCount = computed(() => canvas.content.replace(/\s/g, '').length)
 const sourceSession = computed(() => chat.sessions.find((session) => session.id === canvas.sourceSessionId))
 const sourceMessage = computed(() => sourceSession.value?.messages.find((message) => message.id === canvas.sourceMessageId))
-const canSave = computed(() => !canvas.loading && !canvas.saving && (canvas.dirty || canvas.status === 'draft'))
+const canSave = computed(() => canvas.canEdit && !canvas.loading && !canvas.saving && (canvas.dirty || canvas.status === 'draft'))
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined
 watch(() => [canvas.title, canvas.content, canvas.loading, canvas.saving, aiBusy.value], () => {
   canvas.persistDraft()
   clearTimeout(autosaveTimer)
-  if (canvas.open && canvas.dirty && !canvas.loading && !canvas.saving && !aiBusy.value && !canvas.error && canvas.content.trim() && canvas.title.trim()) {
+  if (canvas.open && canvas.canEdit && canvas.dirty && !canvas.loading && !canvas.saving && !aiBusy.value && !canvas.error && canvas.content.trim() && canvas.title.trim()) {
     autosaveTimer = setTimeout(() => { void canvas.save(true) }, 2000)
   }
 })
@@ -45,6 +45,7 @@ const backupOnExit = () => canvas.persistDraft()
 window.addEventListener('pagehide', backupOnExit)
 onBeforeUnmount(() => { clearTimeout(autosaveTimer); backupOnExit(); window.removeEventListener('pagehide', backupOnExit) })
 const retryIndex = async () => {
+  if (!canvas.canEdit) return
   try { await agentApi.reindexDocument(canvas.documentId); canvas.indexStatus = 'indexed'; canvas.notice = '知识库索引已完成。' }
   catch (error) { canvas.error = error instanceof Error ? error.message : '索引失败，文档仍已保存。' }
 }
@@ -95,7 +96,7 @@ const openHistory = async () => {
 }
 
 const restoreVersion = () => {
-  if (!selectedVersion.value) return
+  if (!selectedVersion.value || !canvas.canEdit) return
   canvas.content = selectedVersion.value?.contentMd ?? canvas.content
   canvas.notice = `版本 ${selectedVersion.value?.version} 已载入编辑器，保存后会创建新版本。`
   selectedVersion.value = null
@@ -104,7 +105,7 @@ const restoreVersion = () => {
 }
 
 const applyAi = async (action: AiAction) => {
-  if (aiBusy.value || !canvas.content.trim()) return
+  if (aiBusy.value || !canvas.canEdit || !canvas.content.trim()) return
   aiBusy.value = true
   aiMenuOpen.value = false
   canvas.error = ''
@@ -157,7 +158,7 @@ const jumpToChat = () => {
       <div class="canvas-toolbar">
         <div class="mode-switch"><button :class="{ active: mode === 'edit' }" type="button" @click="mode = 'edit'"><PenLine :size="13" />编辑</button><button :class="{ active: mode === 'preview' }" type="button" @click="mode = 'preview'"><Maximize2 :size="13" />预览</button></div>
         <div class="ai-selector">
-          <button class="ai-trigger" type="button" :disabled="aiBusy || !canvas.content.trim()" @click="aiMenuOpen = !aiMenuOpen"><LoaderCircle v-if="aiBusy" class="spin" :size="14" /><Sparkles v-else :size="14" />{{ aiBusy ? '处理中' : 'AI 助手' }}<ChevronDown :size="12" /></button>
+          <button class="ai-trigger" type="button" :disabled="aiBusy || !canvas.canEdit || !canvas.content.trim()" @click="aiMenuOpen = !aiMenuOpen"><LoaderCircle v-if="aiBusy" class="spin" :size="14" /><Sparkles v-else :size="14" />{{ aiBusy ? '处理中' : 'AI 助手' }}<ChevronDown :size="12" /></button>
           <div v-if="aiMenuOpen" class="ai-menu"><button type="button" @click="applyAi('rewrite')">改写表达<small>改善语气与结构</small></button><button type="button" @click="applyAi('expand')">扩写内容<small>补充论据与细节</small></button><button type="button" @click="applyAi('summarize')">总结文档<small>提炼要点与行动</small></button></div>
         </div>
       </div>
@@ -165,21 +166,21 @@ const jumpToChat = () => {
       <div class="canvas-body">
         <div v-if="historyOpen" class="history-view">
           <button class="back-button" type="button" @click="selectedVersion ? selectedVersion = null : historyOpen = false"><ArrowLeft :size="14" />{{ selectedVersion ? '返回版本列表' : '返回编辑器' }}</button>
-          <template v-if="selectedVersion"><h2>版本 {{ selectedVersion.version }}</h2><p>创建于 {{ selectedVersion.createdAt ? new Date(selectedVersion.createdAt).toLocaleString('zh-CN') : '未知时间' }}</p><div class="history-content"><MarkdownContent :content="selectedVersion.contentMd || ''" /></div><button class="secondary-button" type="button" @click="restoreVersion">将此版本载入编辑器</button></template>
+          <template v-if="selectedVersion"><h2>版本 {{ selectedVersion.version }}</h2><p>创建于 {{ selectedVersion.createdAt ? new Date(selectedVersion.createdAt).toLocaleString('zh-CN') : '未知时间' }}</p><div class="history-content"><MarkdownContent :content="selectedVersion.contentMd || ''" /></div><button v-if="canvas.canEdit" class="secondary-button" type="button" @click="restoreVersion">将此版本载入编辑器</button></template>
           <template v-else><h2>历史版本</h2><p>每次保存都会保留一个独立版本。</p><div v-if="historyLoading" class="muted-line">正在加载…</div><div v-else-if="historyError" class="error-line">{{ historyError }}</div><button v-for="item in versions" :key="item.id" class="version-row" type="button" @click="selectedVersion = item"><span>版本 {{ item.version }}</span><small>{{ item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN') : '' }}</small></button></template>
         </div>
         <template v-else>
-          <div class="document-head"><span class="eyebrow">{{ canvas.sourceMessageId ? '由聊天回答创建' : '工作区文档' }}</span><input v-model="canvas.title" aria-label="文档标题" placeholder="文档标题" :readonly="aiBusy" /><div class="document-subtitle"><span>{{ wordCount }} 字</span><span>·</span><span>{{ canvas.saving ? '正在保存…' : canvas.dirty ? '有未保存的修改' : '所有修改已保存' }}</span><span>·</span><span>{{ canvas.status === 'draft' ? '草稿' : '已保存文档' }}</span></div></div>
-          <div v-if="canvas.documentId" class="storage-actions"><span>知识库：{{ canvas.indexStatus === 'indexed' ? '已索引' : canvas.indexStatus === 'failed' ? '索引失败，正文已保存' : '未索引' }}</span><button type="button" :disabled="canvas.dirty || canvas.saving" @click="retryIndex">{{ canvas.indexStatus === 'failed' ? '重试索引' : '建立索引' }}</button><button v-if="canvas.hasOriginal" type="button" @click="downloadOriginal">下载原始附件</button></div>
+          <div class="document-head"><span class="eyebrow">{{ canvas.sourceMessageId ? '由聊天回答创建' : canvas.canEdit ? '工作区文档' : '共享只读文档' }}</span><input v-model="canvas.title" aria-label="文档标题" placeholder="文档标题" :readonly="aiBusy || !canvas.canEdit" /><div class="document-subtitle"><span>{{ wordCount }} 字</span><span>·</span><span>{{ !canvas.canEdit ? '只读' : canvas.saving ? '正在保存…' : canvas.dirty ? '有未保存的修改' : '所有修改已保存' }}</span><span>·</span><span>{{ canvas.status === 'draft' ? '草稿' : '已保存文档' }}</span></div></div>
+          <div v-if="canvas.documentId" class="storage-actions"><span>知识库：{{ canvas.indexStatus === 'indexed' ? '已索引' : canvas.indexStatus === 'failed' ? '索引失败，正文已保存' : '未索引' }}</span><button v-if="canvas.canEdit" type="button" :disabled="canvas.dirty || canvas.saving" @click="retryIndex">{{ canvas.indexStatus === 'failed' ? '重试索引' : '建立索引' }}</button><button v-if="canvas.hasOriginal" type="button" @click="downloadOriginal">下载原始附件</button></div>
           <div v-if="canvas.sourceSessionId" class="source-link"><span><Sparkles :size="13" />关联对话：{{ sourceSession?.title || '会话' }}<small v-if="sourceMessage">{{ sourceMessage.content.slice(0, 42) }}</small></span><button type="button" @click="jumpToChat">查看对话</button></div>
-          <textarea v-if="mode === 'edit'" v-model="canvas.content" class="document-editor" aria-label="Markdown 文档正文" placeholder="开始撰写文档内容…\n\n支持 Markdown 标题、列表和引用。" :readonly="aiBusy"></textarea>
+          <textarea v-if="mode === 'edit'" v-model="canvas.content" class="document-editor" aria-label="Markdown 文档正文" placeholder="开始撰写文档内容…\n\n支持 Markdown 标题、列表和引用。" :readonly="aiBusy || !canvas.canEdit"></textarea>
           <div v-else class="document-preview"><MarkdownContent v-if="canvas.content" :content="canvas.content" /><p v-else class="empty-preview">正文为空，切换到编辑模式开始写作。</p></div>
         </template>
       </div>
 
       <div v-if="canvas.error" class="canvas-feedback error" role="alert">{{ canvas.error }}</div>
       <div v-else-if="canvas.notice" class="canvas-feedback"><Check :size="13" />{{ canvas.notice }}</div>
-      <footer class="canvas-footer"><button class="history-button" type="button" @click="openHistory"><Clock3 :size="15" />历史版本</button><button class="primary-button" type="button" :disabled="!canSave || aiBusy" @click="save"><LoaderCircle v-if="canvas.saving" class="spin" :size="14" /><Save v-else :size="14" />{{ canvas.saving ? '保存中' : '保存文档' }}</button></footer>
+      <footer class="canvas-footer"><button class="history-button" type="button" @click="openHistory"><Clock3 :size="15" />历史版本</button><button v-if="canvas.canEdit" class="primary-button" type="button" :disabled="!canSave || aiBusy" @click="save"><LoaderCircle v-if="canvas.saving" class="spin" :size="14" /><Save v-else :size="14" />{{ canvas.saving ? '保存中' : '保存文档' }}</button></footer>
     </template>
   </aside>
 </template>

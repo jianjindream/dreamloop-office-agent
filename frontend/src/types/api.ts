@@ -25,6 +25,26 @@ export interface DocumentSummary {
   updatedAt?: string
   latestVersion?: number
   latestVersionId?: EntityId
+  workspaceId?: string
+  ownerUserId?: string
+  visibility?: 'private' | 'workspace' | 'restricted'
+  permissionVersion?: number
+  accessLevel?: 'none' | 'read' | 'write' | 'manage'
+  canManage?: boolean
+}
+
+export interface DocumentPermissionEntry {
+  principalType: 'user' | 'role'
+  principalId: string
+  permission: 'read' | 'write' | 'manage'
+  effect: 'allow' | 'deny'
+}
+
+export interface DocumentPermissionView {
+  documentId: string
+  visibility: 'private' | 'workspace' | 'restricted'
+  permissionVersion: number
+  entries: DocumentPermissionEntry[]
 }
 
 export interface DocumentVersion {
@@ -136,6 +156,8 @@ export interface WorkspaceMember {
   administrator: boolean
   editor: boolean
 }
+
+export type WorkspaceDirectoryMember = Pick<WorkspaceMember, 'userId' | 'displayName' | 'role' | 'status'>
 
 export interface ConnectionProvider { id: string; name: string; capabilities: string[] }
 export interface OfficeConnection {

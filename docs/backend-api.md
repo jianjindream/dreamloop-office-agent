@@ -37,7 +37,7 @@
 - `knowledge_scope`：`none`、`workspace` 或 `selected`。
 - `document_ids`：`selected` 范围内的文档 ID，去重后最多 20 个。只要传入文档 ID，服务端就按精确资料范围执行。
 
-服务端不信任客户端提供的索引哈希，会按当前身份重新读取文档并校验归属、回收站状态和最新版本索引状态。未索引资料返回 `409 DOCUMENT_NOT_INDEXED`，越权资料按不存在处理。响应增加 `intent`、`knowledge_scope`、`document_ids`；`search_results` 中包含 `document_id`、`version_id`、`document_title`、`version`、`locator`、`excerpt` 和检索来源。助手消息的这些元数据保存在服务端会话历史中。
+服务端不信任客户端提供的索引哈希，会按当前身份重新读取文档并校验文件 ACL、回收站状态和最新版本索引状态。未索引资料返回 `409 DOCUMENT_NOT_INDEXED`，越权资料按不存在处理。`workspace` 范围只检索当前用户可读的文件；召回前会把允许的 `doc_hash` 下推到 ES、Milvus 和 Neo4j，召回后再次校验。响应增加 `intent`、`knowledge_scope`、`document_ids`；`search_results` 中包含 `document_id`、`version_id`、`document_title`、`version`、`locator`、`excerpt` 和检索来源。助手消息的这些元数据保存在服务端会话历史中。
 
 ## 文档与上传
 
@@ -47,6 +47,11 @@
 - `POST /documents/{id}/restore`：恢复文档，保留全部版本和附件；需要检索时重新建立索引。
 - `POST /documents/{id}/reindex`：对最新版本重建索引，不创建新正文版本。
 - `GET /documents/{id}/original`：下载已授权文档的原始上传字节；AI 创建的文档返回 `ATTACHMENT_NOT_FOUND`。
+- `GET /documents/{id}/permissions`：文档所有者、工作区管理员或拥有 `manage` 权限的成员读取共享设置。
+- `PUT /documents/{id}/permissions`：原子替换文件 ACL，请求为 `{ "visibility":"private|workspace|restricted", "entries":[{"principal_type":"user|role","principal_id":"bob","permission":"read|write|manage","effect":"allow|deny"}] }`。显式 `deny` 优先，变更从下一次文档读取和 RAG 查询立即生效。
+- `GET /team/directory`：当前工作区有效成员目录，供文档共享选择器使用。
+
+文档可见范围：`private` 仅所有者和工作区管理员；`workspace` 对有效成员可读；`restricted` 需要 ACL 命中。工作区 `viewer` 仍受粗粒度只读角色限制，即使获得文件 `write` 权限也不能修改内容。
 - `POST /upload/file`：可附带 `upload_id`。
 - `GET /uploads/{uploadId}/progress`：返回 `received`、`reading`、`parsing`、`indexing`、`completed` 或 `failed` 阶段及百分比。
 

@@ -45,6 +45,7 @@ class DocumentPersistenceApiTest {
         AppConfig app=new AppConfig(); database=new WorkspaceDatabase(storage,app); rag=mock(RagService.class);
         chatApplication=mock(ChatApplicationService.class); agent=mock(UnifiedAgentService.class);
         when(agent.getTools()).thenReturn(Map.of());
+        when(agent.getRagService()).thenReturn(rag);
         when(chatApplication.process(any(ChatRequest.class),any(AtomicBoolean.class))).thenReturn(new ChatResponse());
         var controller=new AgentController(chatApplication,agent,mock(InfrastructureService.class),app,
                 mock(ToolService.class),new DocumentParser(),new DocumentLibraryService(new JdbcLibraryRepo(database),rag),
@@ -133,5 +134,15 @@ class DocumentPersistenceApiTest {
                 .header("X-User-Id","alice").header("X-Workspace-Id","team-a")
                 .content("{\"message\":\"总结草稿\",\"session_id\":\"s3\",\"document_ids\":[\""+unindexedId+"\"]}"))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("DOCUMENT_NOT_INDEXED"));
+    }
+
+    @Test void rawUploadNeverReturnsGlobalChunkContents() throws Exception {
+        doReturn(Map.entry(2, "private-hash")).when(rag).ingest(anyString(), anyString());
+        mvc.perform(post("/api/upload").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":\"private material\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.doc_hash").value("private-hash"))
+                .andExpect(jsonPath("$.chunks").doesNotExist());
+        verify(rag, never()).getChunks();
     }
 }

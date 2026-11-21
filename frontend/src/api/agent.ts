@@ -10,6 +10,8 @@ import type {
   DocumentVersion,
   DocumentWritePayload,
   DocumentWriteResult,
+  DocumentPermissionView,
+  DocumentPermissionEntry,
   McpRegistration,
   SnapshotSummary,
   SystemStatus,
@@ -21,6 +23,7 @@ import type {
   WeeklyReportResult,
   ReviewDiff,
   WorkspaceMember,
+  WorkspaceDirectoryMember,
   ConnectionProvider,
   OfficeConnection,
   OfficeTask,
@@ -110,6 +113,21 @@ export const agentApi = {
     request<ApiOperationResult>(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   restoreDocument: (id: string | number) => request<ApiOperationResult>(`/api/documents/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
   reindexDocument: (id: string | number) => request<ApiOperationResult>(`/api/documents/${encodeURIComponent(id)}/reindex`, { method: 'POST' }),
+  documentPermissions: (id: string | number) =>
+    request<DocumentPermissionView>(`/api/documents/${encodeURIComponent(id)}/permissions`),
+  updateDocumentPermissions: (id: string | number, visibility: DocumentPermissionView['visibility'], entries: DocumentPermissionEntry[]) =>
+    request<DocumentPermissionView>(`/api/documents/${encodeURIComponent(id)}/permissions`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        visibility,
+        entries: entries.map((entry) => ({
+          principal_type: entry.principalType,
+          principal_id: entry.principalId,
+          permission: entry.permission,
+          effect: entry.effect,
+        })),
+      }),
+    }),
   downloadOriginal: async (id: string | number) => {
     const response = await fetch(`${API_BASE_URL}/api/documents/${encodeURIComponent(id)}/original`, { headers: identityHeaders })
     if (!response.ok) throw new ApiError('原始附件下载失败', response.status)
@@ -156,6 +174,7 @@ export const agentApi = {
   },
   teamMe: () => request<WorkspaceMember>('/api/team/me'),
   teamMembers: () => request<WorkspaceMember[]>('/api/team/members'),
+  teamDirectory: () => request<WorkspaceDirectoryMember[]>('/api/team/directory'),
   inviteMember: (payload: { user_id: string; display_name: string; email: string; role: WorkspaceMember['role'] }) =>
     request<WorkspaceMember>('/api/team/members', { method: 'POST', body: JSON.stringify(payload) }),
   updateMember: (userId: string, payload: { role: WorkspaceMember['role']; status: WorkspaceMember['status'] }) =>

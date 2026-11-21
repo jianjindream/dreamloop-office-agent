@@ -7,6 +7,7 @@ import com.jianjin.assistant.domain.rag.QueryType;
 import com.jianjin.assistant.domain.rag.Rewriter;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
 import com.jianjin.assistant.infrastructure.persistence.RagTenantRepository;
+import com.jianjin.assistant.service.document.DocumentAccessService;
 import com.jianjin.assistant.model.Chunk;
 import org.junit.jupiter.api.Test;
 
@@ -139,6 +140,34 @@ class RagServiceAdaptiveRrfTest {
         } finally {
             service.close();
         }
+    }
+
+    @Test
+    void sharedAclHashesArePushedDownAndSurvivePostRetrievalCheck() {
+        AppConfig cfg = new AppConfig();
+        HybridStore store = mock(HybridStore.class);
+        when(store.getMode()).thenReturn("hybrid");
+        Set<String> allowed = Set.of("private-doc", "shared-doc");
+        HybridStore.SearchResult own = new HybridStore.SearchResult(1, new Chunk(0, "own"), 0.2,
+                "hybrid", 1, "private-doc", 0);
+        HybridStore.SearchResult shared = new HybridStore.SearchResult(2, new Chunk(0, "shared"), 0.1,
+                "hybrid", 1, "shared-doc", 0);
+        when(store.search("question", 12, allowed)).thenReturn(List.of(own, shared));
+        RagTenantRepository tenants = mock(RagTenantRepository.class);
+        when(tenants.documentHashes("workspace:user")).thenReturn(Set.of("private-doc"));
+        DocumentAccessService access = mock(DocumentAccessService.class);
+        when(access.readableDocumentHashes("workspace:user")).thenReturn(Set.of("shared-doc"));
+
+        RagService service = new RagService(cfg, store, mock(TextSplitter.class), mock(InfrastructureService.class));
+        service.setTenantRepository(tenants);
+        service.setDocumentAccess(access);
+        service.restoreChunks(List.of(new Chunk(1, "loaded")));
+        try {
+            RagService.QueryResult output = service.queryWithHistory("workspace:user", "question", List.of());
+            assertEquals(2, output.results.size());
+            assertTrue(output.results.stream().anyMatch(result -> "shared-doc".equals(result.docHash)));
+            verify(store).search("question", 12, allowed);
+        } finally { service.close(); }
     }
 
     @Test

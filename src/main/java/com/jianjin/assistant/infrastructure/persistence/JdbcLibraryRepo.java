@@ -28,6 +28,8 @@ public class JdbcLibraryRepo implements LibraryRepo {
                 doc = new Document();
                 doc.setId(Ids.newId("doc")); doc.setCreatedAt(Instant.now());
                 doc.setCreatedBy(req.getCreatedBy()); doc.setSource(req.getSource());
+                doc.setWorkspaceId(req.getWorkspaceId()); doc.setOwnerUserId(req.getOwnerUserId());
+                doc.setVisibility(req.getVisibility()); doc.setPermissionVersion(1);
             } else {
                 doc = readDocument(c, req.getDocumentId(), true);
                 if (req.getBaseVersion() != null && req.getBaseVersion() != doc.getLatestVersion()) throw new DocumentVersionConflictException();
@@ -45,13 +47,15 @@ public class JdbcLibraryRepo implements LibraryRepo {
             doc.setTitle(req.getTitle()); doc.setDocType(req.getDocType()); doc.setStatus(req.getStatus());
             doc.setUpdatedAt(version.getCreatedAt()); doc.setLatestVersion(version.getVersion()); doc.setLatestVersionId(version.getId());
             String sql = created
-                    ? "INSERT INTO office_documents(title,doc_type,status,updated_at,latest_version,latest_version_id,source,created_by,created_at,id) VALUES(?,?,?,?,?,?,?,?,?,?)"
+                    ? "INSERT INTO office_documents(title,doc_type,status,updated_at,latest_version,latest_version_id,source,created_by,created_at,id,workspace_id,owner_user_id,visibility,permission_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                     : "UPDATE office_documents SET title=?,doc_type=?,status=?,updated_at=?,latest_version=?,latest_version_id=? WHERE id=?";
             try (PreparedStatement ps = c.prepareStatement(sql)) {
                 ps.setString(1, doc.getTitle()); ps.setString(2, doc.getDocType()); ps.setString(3, doc.getStatus());
                 ps.setObject(4, timestamp(doc.getUpdatedAt())); ps.setInt(5, doc.getLatestVersion()); ps.setString(6, doc.getLatestVersionId());
                 if (created) {
                     ps.setString(7, doc.getSource()); ps.setString(8, doc.getCreatedBy()); ps.setObject(9, timestamp(doc.getCreatedAt())); ps.setString(10, doc.getId());
+                    ps.setString(11, doc.getWorkspaceId()); ps.setString(12, doc.getOwnerUserId());
+                    ps.setString(13, doc.getVisibility()); ps.setLong(14, doc.getPermissionVersion());
                 } else ps.setString(7, doc.getId());
                 ps.executeUpdate();
             }
@@ -135,7 +139,9 @@ public class JdbcLibraryRepo implements LibraryRepo {
         Document d=new Document(); d.setId(rs.getString("id")); d.setTitle(rs.getString("title"));
         d.setDocType(rs.getString("doc_type")); d.setSource(rs.getString("source")); d.setStatus(rs.getString("status"));
         d.setCreatedBy(rs.getString("created_by")); d.setCreatedAt(rs.getTimestamp("created_at").toInstant());
-        d.setUpdatedAt(rs.getTimestamp("updated_at").toInstant()); d.setLatestVersion(rs.getInt("latest_version")); d.setLatestVersionId(rs.getString("latest_version_id")); return d;
+        d.setUpdatedAt(rs.getTimestamp("updated_at").toInstant()); d.setLatestVersion(rs.getInt("latest_version")); d.setLatestVersionId(rs.getString("latest_version_id"));
+        d.setWorkspaceId(rs.getString("workspace_id")); d.setOwnerUserId(rs.getString("owner_user_id"));
+        d.setVisibility(rs.getString("visibility")); d.setPermissionVersion(rs.getLong("permission_version")); return d;
     }
     private DocumentVersion version(ResultSet rs) throws Exception {
         DocumentVersion v=new DocumentVersion(); v.setId(rs.getString("id")); v.setDocumentId(rs.getString("document_id"));

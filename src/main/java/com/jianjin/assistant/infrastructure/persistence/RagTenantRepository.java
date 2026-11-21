@@ -19,12 +19,17 @@ public class RagTenantRepository {
     public RagTenantRepository(PostgresConnector pg) { this.pg = pg; }
 
     public void assign(String docHash, String ownerKey) {
+        assign(docHash, ownerKey, null);
+    }
+
+    public void assign(String docHash, String ownerKey, String documentId) {
         memoryOwners.put(docHash, ownerKey);
         var connection = pg.connection();
         if (connection == null) return;
-        try (PreparedStatement ps = connection.prepareStatement("INSERT INTO rag_documents(doc_hash,owner_key) VALUES(?,?) " +
-                "ON CONFLICT(doc_hash) DO UPDATE SET owner_key=EXCLUDED.owner_key,updated_at=NOW()")) {
-            ps.setString(1,docHash); ps.setString(2,ownerKey); ps.executeUpdate();
+        String workspaceId = ownerKey != null && ownerKey.contains(":") ? ownerKey.substring(0, ownerKey.indexOf(':')) : "default";
+        try (PreparedStatement ps = connection.prepareStatement("INSERT INTO rag_documents(doc_hash,owner_key,document_id,workspace_id) VALUES(?,?,?,?) " +
+                "ON CONFLICT(doc_hash) DO UPDATE SET owner_key=EXCLUDED.owner_key,document_id=EXCLUDED.document_id,workspace_id=EXCLUDED.workspace_id,updated_at=NOW()")) {
+            ps.setString(1,docHash); ps.setString(2,ownerKey); ps.setString(3, documentId); ps.setString(4, workspaceId); ps.executeUpdate();
         } catch (Exception e) { throw new IllegalStateException("RAG owner persistence failed", e); }
     }
 

@@ -17,9 +17,11 @@ export const useDocumentCanvasStore = defineStore('documentCanvas', {
     docType: 'note', version: 0, status: 'draft', sourceSessionId: '', sourceMessageId: '',
     loading: false, saving: false, error: '', notice: '', requestId: 0,
     indexStatus: 'not_indexed', originalFilename: '', hasOriginal: false,
+    accessLevel: 'manage' as 'none' | 'read' | 'write' | 'manage',
     draftKey: '', recovery: null as RecoveryDraft | null,
   }),
   getters: {
+    canEdit: (state) => !state.documentId || state.accessLevel === 'write' || state.accessLevel === 'manage',
     dirty: (state) => state.documentId
       ? state.title !== state.savedTitle || state.content !== state.savedContent
       : Boolean(state.content.trim() || (state.title.trim() && state.title.trim() !== '未命名文档')),
@@ -76,6 +78,7 @@ export const useDocumentCanvasStore = defineStore('documentCanvas', {
       this.hasOriginal = false
       this.originalFilename = ''
       this.notice = sourceMessageId ? '已从聊天回答创建草稿，可编辑后保存。' : '空白草稿已就绪。'
+      this.accessLevel = 'manage'
       this.persistDraft()
     },
     async openDocument(id: string | number) {
@@ -111,6 +114,8 @@ export const useDocumentCanvasStore = defineStore('documentCanvas', {
         this.indexStatus = String(metadata.index_status ?? 'not_indexed')
         this.hasOriginal = Boolean(metadata.original_attachment)
         this.originalFilename = String(metadata.original_filename ?? this.title)
+        this.accessLevel = detail.document.accessLevel ?? 'read'
+        if (!this.canEdit) this.notice = '你拥有只读权限；可以查看、下载和用于检索，但不能修改正文。'
       } catch (error) {
         if (requestId !== this.requestId) return
         this.error = error instanceof Error ? error.message : '加载文档失败'
@@ -144,6 +149,7 @@ export const useDocumentCanvasStore = defineStore('documentCanvas', {
         this.indexStatus = String(metadata.index_status ?? 'not_indexed')
         this.hasOriginal = Boolean(metadata.original_attachment)
         this.originalFilename = String(metadata.original_filename ?? this.title)
+        this.accessLevel = detail.document.accessLevel ?? 'read'
         this.notice = `正在查看引用时使用的历史版本 ${version.version}；如需编辑，请先确认当前最新版本。`
       } catch (error) {
         if (requestId !== this.requestId) return
@@ -154,6 +160,10 @@ export const useDocumentCanvasStore = defineStore('documentCanvas', {
     },
     async save(automatic = false) {
       if (this.saving || this.loading) return false
+      if (!this.canEdit) {
+        if (!automatic) this.error = '当前文档为只读，无法保存修改。'
+        return false
+      }
       const title = this.title.trim()
       const content = this.content.trim()
       if (!title || !content) {

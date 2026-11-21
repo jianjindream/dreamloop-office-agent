@@ -91,4 +91,18 @@ describe('document canvas', () => {
     expect(restored.content).toBe('待恢复的正文')
     expect(localStorage.getItem(restored.draftKey)).toContain('待恢复的正文')
   })
+
+  it('keeps shared read-only documents from being saved', async () => {
+    vi.mocked(agentApi.document).mockResolvedValue({
+      document: { id: 'shared-1', title: '共享资料', accessLevel: 'read' },
+      version: { id: 'ver-1', documentId: 'shared-1', version: 1, contentMd: '只读正文' },
+    })
+    const store = useDocumentCanvasStore()
+    await store.openDocument('shared-1')
+    expect(store.canEdit).toBe(false)
+    store.content = '试图篡改'
+    expect(await store.save()).toBe(false)
+    expect(store.error).toBe('当前文档为只读，无法保存修改。')
+    expect(agentApi.updateDocument).not.toHaveBeenCalled()
+  })
 })

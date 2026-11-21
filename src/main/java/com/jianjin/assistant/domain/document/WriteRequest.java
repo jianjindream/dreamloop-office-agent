@@ -15,6 +15,9 @@ public class WriteRequest {
     private String status = Document.STATUS_ACTIVE;
     private Integer baseVersion;
     private Map<String, Object> metadata = new LinkedHashMap<>();
+    private String workspaceId = "";
+    private String ownerUserId = "";
+    private String visibility = Document.VISIBILITY_PRIVATE;
 
     public WriteRequest() {}
 
@@ -38,10 +41,15 @@ public class WriteRequest {
         r.createdBy = trim(r.createdBy);
         r.contentMd = trim(r.contentMd);
         r.summary = trim(r.summary);
+        r.workspaceId = trim(r.workspaceId);
+        r.ownerUserId = trim(r.ownerUserId);
+        r.visibility = trim(r.visibility).toLowerCase();
         if (r.docType.isEmpty()) r.docType = "note";
         if (r.source.isEmpty()) r.source = Document.SOURCE_AGENT;
         if (r.createdBy.isEmpty()) r.createdBy = "agent";
         if (r.metadata == null) r.metadata = new LinkedHashMap<>();
+        if (!java.util.List.of(Document.VISIBILITY_PRIVATE, Document.VISIBILITY_WORKSPACE,
+                Document.VISIBILITY_RESTRICTED).contains(r.visibility)) r.visibility = Document.VISIBILITY_PRIVATE;
         return r;
     }
 
@@ -69,4 +77,10 @@ public class WriteRequest {
     public void setMetadata(Map<String, Object> metadata) {
         this.metadata = metadata == null ? new LinkedHashMap<>() : metadata;
     }
+    public String getWorkspaceId() { return workspaceId; }
+    public void setWorkspaceId(String workspaceId) { this.workspaceId = workspaceId == null ? "" : workspaceId; }
+    public String getOwnerUserId() { return ownerUserId; }
+    public void setOwnerUserId(String ownerUserId) { this.ownerUserId = ownerUserId == null ? "" : ownerUserId; }
+    public String getVisibility() { return visibility; }
+    public void setVisibility(String visibility) { this.visibility = visibility == null ? Document.VISIBILITY_PRIVATE : visibility; }
 }

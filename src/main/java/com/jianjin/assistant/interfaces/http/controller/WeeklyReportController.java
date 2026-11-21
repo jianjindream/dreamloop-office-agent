@@ -5,6 +5,7 @@ import com.jianjin.assistant.domain.document.LibraryRepo;
 import com.jianjin.assistant.interfaces.http.error.ApiException;
 import com.jianjin.assistant.interfaces.http.security.RequestIdentityHolder;
 import com.jianjin.assistant.service.document.DocumentLibraryService;
+import com.jianjin.assistant.service.document.DocumentAccessService;
 import com.jianjin.assistant.service.office.OfficeExportService;
 import com.jianjin.assistant.service.office.ReviewDiffService;
 import com.jianjin.assistant.service.office.WeeklyReportService;
@@ -33,13 +34,16 @@ public class WeeklyReportController {
     private final ReviewDiffService diffs;
     private final OfficeExportService exports;
     private final DocumentLibraryService library;
+    private final DocumentAccessService access;
 
     public WeeklyReportController(WeeklyReportService weeklyReports, ReviewDiffService diffs,
-                                  OfficeExportService exports, DocumentLibraryService library) {
+                                  OfficeExportService exports, DocumentLibraryService library,
+                                  DocumentAccessService access) {
         this.weeklyReports = weeklyReports;
         this.diffs = diffs;
         this.exports = exports;
         this.library = library;
+        this.access = access;
     }
 
     @GetMapping("/weekly-report/templates")
@@ -102,7 +106,7 @@ public class WeeklyReportController {
         LibraryRepo.DocumentWithVersion value;
         try { value = library.get(id); }
         catch (IllegalArgumentException e) { throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND); }
-        if (!owned(value.version)) throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
+        if (!access.canRead(RequestIdentityHolder.current(), value.document)) throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
         return value;
     }
 
@@ -110,16 +114,10 @@ public class WeeklyReportController {
         DocumentVersion version;
         try { version = library.repo().getVersion(versionId); }
         catch (IllegalArgumentException e) { throw new ApiException("VERSION_NOT_FOUND", "版本不存在", HttpStatus.NOT_FOUND); }
-        if (!documentId.equals(version.getDocumentId()) || !owned(version)) {
+        if (!documentId.equals(version.getDocumentId()) || !access.canRead(RequestIdentityHolder.current(), library.get(documentId).document)) {
             throw new ApiException("VERSION_NOT_FOUND", "版本不存在", HttpStatus.NOT_FOUND);
         }
         return version;
-    }
-
-    private boolean owned(DocumentVersion version) {
-        String owner = RequestIdentityHolder.current().ownerKey();
-        Object actual = version.getMetadata().get("owner_key");
-        return owner.equals(String.valueOf(actual)) || (actual == null && "default:default".equals(owner));
     }
 
     private static String string(Object value) { return value == null ? "" : String.valueOf(value); }

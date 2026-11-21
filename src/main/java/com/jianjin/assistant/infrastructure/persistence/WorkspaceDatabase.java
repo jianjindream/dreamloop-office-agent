@@ -74,8 +74,15 @@ public class WorkspaceDatabase implements AutoCloseable {
         CREATE TABLE IF NOT EXISTS office_documents (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, doc_type TEXT NOT NULL, source TEXT NOT NULL,
           status TEXT NOT NULL, created_by TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-          updated_at TIMESTAMP WITH TIME ZONE NOT NULL, latest_version INTEGER NOT NULL, latest_version_id TEXT NOT NULL)
+          updated_at TIMESTAMP WITH TIME ZONE NOT NULL, latest_version INTEGER NOT NULL, latest_version_id TEXT NOT NULL,
+          workspace_id TEXT, owner_user_id TEXT, visibility TEXT NOT NULL DEFAULT 'private',
+          permission_version BIGINT NOT NULL DEFAULT 1)
         """,
+        "ALTER TABLE office_documents ADD COLUMN IF NOT EXISTS workspace_id TEXT",
+        "ALTER TABLE office_documents ADD COLUMN IF NOT EXISTS owner_user_id TEXT",
+        "ALTER TABLE office_documents ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'",
+        "ALTER TABLE office_documents ADD COLUMN IF NOT EXISTS permission_version BIGINT NOT NULL DEFAULT 1",
+        "CREATE INDEX IF NOT EXISTS idx_office_documents_security ON office_documents(workspace_id, owner_user_id, visibility, status)",
         """
         CREATE TABLE IF NOT EXISTS office_document_versions (
           id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES office_documents(id), version INTEGER NOT NULL,
@@ -105,6 +112,15 @@ public class WorkspaceDatabase implements AutoCloseable {
           PRIMARY KEY(workspace_id, user_id))
         """,
         "CREATE INDEX IF NOT EXISTS idx_workspace_members_status ON workspace_members(workspace_id, status, role)",
+        """
+        CREATE TABLE IF NOT EXISTS document_permissions (
+          document_id TEXT NOT NULL REFERENCES office_documents(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL, principal_type TEXT NOT NULL, principal_id TEXT NOT NULL,
+          permission TEXT NOT NULL, effect TEXT NOT NULL DEFAULT 'allow', created_by TEXT NOT NULL,
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+          PRIMARY KEY(document_id, principal_type, principal_id, permission))
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_document_permissions_lookup ON document_permissions(workspace_id, principal_type, principal_id, document_id)",
         """
         CREATE TABLE IF NOT EXISTS office_connections (
           id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, display_name TEXT NOT NULL,

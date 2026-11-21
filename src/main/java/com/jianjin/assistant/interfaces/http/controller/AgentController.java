@@ -20,6 +20,8 @@ import com.jianjin.assistant.service.document.DocumentLibraryService;
 import com.jianjin.assistant.service.document.DocumentParser;
 import com.jianjin.assistant.service.document.UploadProgressService;
 import com.jianjin.assistant.service.document.AttachmentStore;
+import com.jianjin.assistant.service.document.DocumentAccessService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -77,7 +79,9 @@ public class AgentController {
     private final ChatTaskRegistry tasks;
     private final UploadProgressService uploadProgress;
     private final AttachmentStore attachments;
+    private final DocumentAccessService documentAccess;
 
+    @Autowired
     public AgentController(ChatApplicationService chat,
                            UnifiedAgentService agent,
                            InfrastructureService infra,
@@ -87,7 +91,8 @@ public class AgentController {
                            DocumentLibraryService library,
                            ChatTaskRegistry tasks,
                            UploadProgressService uploadProgress,
-                           AttachmentStore attachments) {
+                           AttachmentStore attachments,
+                           DocumentAccessService documentAccess) {
         this.chat = chat;
         this.agent = agent;
         this.infra = infra;
@@ -98,6 +103,15 @@ public class AgentController {
         this.tasks = tasks;
         this.uploadProgress = uploadProgress;
         this.attachments = attachments;
+        this.documentAccess = documentAccess;
+    }
+
+    /** Backward-compatible constructor used by focused controller tests. */
+    public AgentController(ChatApplicationService chat, UnifiedAgentService agent, InfrastructureService infra,
+                           AppConfig cfg, ToolService toolService, DocumentParser parser,
+                           DocumentLibraryService library, ChatTaskRegistry tasks,
+                           UploadProgressService uploadProgress, AttachmentStore attachments) {
+        this(chat, agent, infra, cfg, toolService, parser, library, tasks, uploadProgress, attachments, null);
     }
 
     /** POST /api/chat — 统一对话入口（同步模式，向后兼容） */
@@ -207,8 +221,7 @@ public class AgentController {
         Map.Entry<Integer, String> result = agent.getRagService().ingest(RequestIdentityHolder.current().ownerKey(), content);
         return Map.of(
                 "chunk_count", result.getKey(),
-                "doc_hash", result.getValue(),
-                "chunks", agent.getRagService().getChunks()
+                "doc_hash", result.getValue()
         );
     }
 
@@ -250,13 +263,16 @@ public class AgentController {
 
         // 落库到本地文档库 + ingest 到 RAG（来源标记为 user_upload）
         String title = file.getOriginalFilename() == null ? pr.parser + " upload" : file.getOriginalFilename();
-        WriteRequest req = new WriteRequest(title, "upload", Document.SOURCE_UPLOAD, "user",
+        WriteRequest req = new WriteRequest(title, "upload", Document.SOURCE_UPLOAD, identity.userId(),
                 pr.content,
                 pr.content.length() > 180 ? pr.content.substring(0, 180) + "..." : pr.content,
                 new LinkedHashMap<>(Map.of(
                         "parser", pr.parser, "pages", pr.pages,
                         "text_chars", pr.textChars, "needs_ocr", pr.needsOCR)));
         req.getMetadata().put("owner_key", identity.ownerKey());
+        req.setWorkspaceId(identity.workspaceId());
+        req.setOwnerUserId(identity.userId());
+        req.setVisibility(Document.VISIBILITY_PRIVATE);
         String attachmentKey = attachments.save(data);
         req.getMetadata().put("original_attachment", attachmentKey);
         req.getMetadata().put("original_filename", title);
@@ -299,7 +315,9 @@ public class AgentController {
     /** GET /api/documents — 文档库列表 */
     @GetMapping("/documents")
     public List<Document> listDocuments(@RequestParam(value="status", defaultValue="active") String status) {
-        String owner = RequestIdentityHolder.current().ownerKey();
+        RequestIdentity identity = RequestIdentityHolder.current();
+        if (documentAccess != null) return documentAccess.listReadable(identity, "deleted".equals(status));
+        String owner = identity.ownerKey();
         return ("deleted".equals(status) ? library.listDeleted() : library.list()).stream()
                 .filter(document -> ownsDocument(document.getId(), owner)).toList();
     }
@@ -307,7 +325,8 @@ public class AgentController {
     /** GET /api/documents/{id} — 取单个文档（含最新版本正文） */
     @GetMapping("/documents/{id}")
     public Map<String, Object> getDocument(@PathVariable("id") String id) {
-        var dv = ownedDocument(id);
+        var dv = readableDocument(id);
+        if (documentAccess != null) documentAccess.decorate(RequestIdentityHolder.current(), dv.document);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("document", dv.document);
         out.put("version", dv.version);
@@ -317,21 +336,21 @@ public class AgentController {
     /** DELETE /api/documents/{id} — move to trash, retaining immutable versions and original bytes. */
     @DeleteMapping("/documents/{id}")
     public Map<String, Object> deleteDocument(@PathVariable("id") String id) {
-        ownedDocument(id);
+        manageableDocument(id, false);
         if (!library.delete(id)) throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
         return Map.of("ok", true, "document_id", id);
     }
 
     @PostMapping("/documents/{id}/restore")
     public Map<String,Object> restoreDocument(@PathVariable String id) {
-        ownedDocument(id, true);
+        manageableDocument(id, true);
         if (!library.restore(id)) throw new ApiException("DOCUMENT_NOT_IN_TRASH", "文档不在回收站中", HttpStatus.CONFLICT);
         return Map.of("ok", true, "document_id", id, "index_status", "not_indexed");
     }
 
     @PostMapping("/documents/{id}/reindex")
     public Map<String,Object> reindexDocument(@PathVariable String id) {
-        ownedDocument(id);
+        writableDocument(id, false);
         try {
             var result = library.reingest(id, null);
             return Map.of("ok", true, "index_status", "indexed", "chunk_count", result.getKey(), "doc_hash", result.getValue());
@@ -342,7 +361,7 @@ public class AgentController {
 
     @GetMapping("/documents/{id}/original")
     public ResponseEntity<Resource> originalDocument(@PathVariable String id) {
-        var document = ownedDocument(id);
+        var document = readableDocument(id);
         Object key = document.version.getMetadata().get("original_attachment");
         if (key == null) throw new ApiException("ATTACHMENT_NOT_FOUND", "该文档没有原始附件", HttpStatus.NOT_FOUND);
         Resource resource;
@@ -357,7 +376,7 @@ public class AgentController {
     /** GET /api/documents/{id}/versions — 按新到旧查看版本。 */
     @GetMapping("/documents/{id}/versions")
     public List<com.jianjin.assistant.domain.document.DocumentVersion> listDocumentVersions(@PathVariable("id") String id) {
-        ownedDocument(id);
+        readableDocument(id);
         return library.listVersions(id);
     }
 
@@ -368,8 +387,12 @@ public class AgentController {
         String content = (String) req.getOrDefault("content_md", "");
         String docType = (String) req.getOrDefault("doc_type", "note");
         boolean ingest = Boolean.TRUE.equals(req.get("ingest_to_rag"));
-        WriteRequest wr = new WriteRequest(title, docType, Document.SOURCE_UPLOAD, RequestIdentityHolder.current().ownerKey(),
+        RequestIdentity identity = RequestIdentityHolder.current();
+        WriteRequest wr = new WriteRequest(title, docType, Document.SOURCE_UPLOAD, identity.userId(),
                 content, "", documentMetadata(req));
+        wr.setWorkspaceId(identity.workspaceId());
+        wr.setOwnerUserId(identity.userId());
+        wr.setVisibility(Document.VISIBILITY_PRIVATE);
         wr.setStatus(Boolean.TRUE.equals(req.get("draft")) ? "draft" : "active");
         DocumentLibraryService.Result res = library.writeDocument(wr, ingest);
         Map<String, Object> out = new LinkedHashMap<>();
@@ -389,7 +412,7 @@ public class AgentController {
     /** PUT /api/documents/{id} — 更新正文或标题，并创建不可变的新版本。 */
     @PutMapping("/documents/{id}")
     public Map<String, Object> updateDocument(@PathVariable("id") String id, @RequestBody Map<String, Object> req) {
-        var current = ownedDocument(id);
+        var current = writableDocument(id, false);
         String title = (String) req.getOrDefault("title", current.document.getTitle());
         String content = (String) req.getOrDefault("content_md", current.version.getContentMd());
         String docType = (String) req.getOrDefault("doc_type", current.document.getDocType());
@@ -399,6 +422,9 @@ public class AgentController {
         WriteRequest wr = new WriteRequest(title, docType, current.document.getSource(),
                 current.document.getCreatedBy(), content, current.version.getSummary(), metadata);
         wr.setDocumentId(id);
+        wr.setWorkspaceId(current.document.getWorkspaceId());
+        wr.setOwnerUserId(current.document.getOwnerUserId());
+        wr.setVisibility(current.document.getVisibility());
         if (req.get("base_version") instanceof Number baseVersion) wr.setBaseVersion(baseVersion.intValue());
         wr.setStatus(Boolean.TRUE.equals(req.get("draft")) ? "draft" : "active");
         DocumentLibraryService.Result res = library.writeDocument(wr, Boolean.TRUE.equals(req.get("ingest_to_rag")));
@@ -410,6 +436,45 @@ public class AgentController {
         out.put("index_status", res.indexStatus);
         if (res.indexError != null) out.put("index_error", res.indexError);
         return out;
+    }
+
+    @GetMapping("/documents/{id}/permissions")
+    public DocumentAccessService.PermissionView documentPermissions(@PathVariable("id") String id) {
+        if (documentAccess == null) throw new ApiException("DOCUMENT_PERMISSIONS_UNAVAILABLE", "权限服务不可用", HttpStatus.SERVICE_UNAVAILABLE);
+        try { return documentAccess.permissions(RequestIdentityHolder.current(), id); }
+        catch (IllegalArgumentException e) { throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND); }
+    }
+
+    @PutMapping("/documents/{id}/permissions")
+    public DocumentAccessService.PermissionView updateDocumentPermissions(@PathVariable("id") String id,
+                                                                           @RequestBody Map<String, Object> request) {
+        if (documentAccess == null) throw new ApiException("DOCUMENT_PERMISSIONS_UNAVAILABLE", "权限服务不可用", HttpStatus.SERVICE_UNAVAILABLE);
+        List<DocumentAccessService.PermissionEntry> entries = new ArrayList<>();
+        Object rawEntries = request.get("entries");
+        if (rawEntries instanceof List<?> list) {
+            for (Object item : list) {
+                if (!(item instanceof Map<?, ?> raw)) continue;
+                entries.add(new DocumentAccessService.PermissionEntry(text(raw.get("principal_type")),
+                        text(raw.get("principal_id")), text(raw.get("permission")), text(raw.get("effect"))));
+            }
+        }
+        try {
+            RequestIdentity identity = RequestIdentityHolder.current();
+            DocumentAccessService.PermissionView updated = documentAccess.replacePermissions(identity, id,
+                    text(request.get("visibility")), entries);
+            try {
+                infra.publishEvent("document.permissions.updated", SSE_MAPPER.writeValueAsString(Map.of(
+                        "document_id", id, "workspace_id", identity.workspaceId(), "user_id", identity.userId(),
+                        "visibility", updated.visibility(), "permission_version", updated.permissionVersion(),
+                        "entry_count", updated.entries().size(), "request_id", identity.requestId())));
+            } catch (Exception ignored) { }
+            return updated;
+        } catch (IllegalArgumentException e) {
+            if (e.getMessage() != null && e.getMessage().contains("无权管理")) {
+                throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
+            }
+            throw new ApiException("DOCUMENT_PERMISSION_INVALID", e.getMessage(), HttpStatus.BAD_REQUEST);
+        }
     }
 
     private Map<String, Object> documentMetadata(Map<String, Object> req) {
@@ -575,18 +640,13 @@ public class AgentController {
     public Map<String, Object> status() {
         String owner = RequestIdentityHolder.current().ownerKey();
         RagService ragService = agent.getRagService();
-        List<Chunk> chunks = ragService.getChunks();
-        List<Map<String, Object>> chunkPreviews = new ArrayList<>();
-        for (Chunk c : chunks) {
-            String preview = c.getContent();
-            if (preview != null && preview.length() > 60) preview = preview.substring(0, 60) + "...";
-            chunkPreviews.add(Map.of("id", c.getId(), "content", preview));
-        }
+        java.util.Set<String> readableHashes = documentAccess == null
+                ? null : documentAccess.readableDocumentHashes(RequestIdentityHolder.current());
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("rag_loaded", ragService.isLoaded());
         result.put("rag_mode", ragService.getMode());
-        result.put("rag_chunks", chunkPreviews);
+        result.put("rag_chunks", ragService.countChunks(readableHashes));
         result.put("short_term_count", agent.getShortTermMemory(owner, null).size());
         result.put("long_term_count", agent.getLongTermMemory(owner).size());
         result.put("preferences", agent.getPreferences(owner).getData());
@@ -650,7 +710,7 @@ public class AgentController {
         LinkedHashSet<String> hashes = new LinkedHashSet<>();
         if ("selected".equals(requested)) {
             for (String documentId : documentIds) {
-                LibraryRepo.DocumentWithVersion selected = ownedDocument(documentId);
+                LibraryRepo.DocumentWithVersion selected = readableDocument(documentId);
                 Object hash = selected.version.getMetadata().get("doc_hash");
                 Object status = selected.version.getMetadata().get("index_status");
                 if (hash == null || !"indexed".equals(String.valueOf(status))) {
@@ -682,6 +742,44 @@ public class AgentController {
         return ownedDocument(id, false);
     }
 
+    private LibraryRepo.DocumentWithVersion readableDocument(String id) {
+        LibraryRepo.DocumentWithVersion document = loadDocument(id, false);
+        if (documentAccess != null && !documentAccess.canRead(RequestIdentityHolder.current(), document.document)) {
+            throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
+        }
+        if (documentAccess == null) return ownedDocument(id, false);
+        return document;
+    }
+
+    private LibraryRepo.DocumentWithVersion writableDocument(String id, boolean includeDeleted) {
+        LibraryRepo.DocumentWithVersion document = loadDocument(id, includeDeleted);
+        if (documentAccess != null && !documentAccess.canWrite(RequestIdentityHolder.current(), document.document)) {
+            throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
+        }
+        if (documentAccess == null) return ownedDocument(id, includeDeleted);
+        return document;
+    }
+
+    private LibraryRepo.DocumentWithVersion manageableDocument(String id, boolean includeDeleted) {
+        LibraryRepo.DocumentWithVersion document = loadDocument(id, includeDeleted);
+        if (documentAccess != null && !documentAccess.canManage(RequestIdentityHolder.current(), document.document)) {
+            throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
+        }
+        if (documentAccess == null) return ownedDocument(id, includeDeleted);
+        return document;
+    }
+
+    private LibraryRepo.DocumentWithVersion loadDocument(String id, boolean includeDeleted) {
+        try {
+            LibraryRepo.DocumentWithVersion document = library.get(id);
+            if (!includeDeleted && "deleted".equals(document.document.getStatus())) {
+                throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND);
+            }
+            return document;
+        } catch (ApiException e) { throw e; }
+        catch (IllegalArgumentException e) { throw new ApiException("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND); }
+    }
+
     private LibraryRepo.DocumentWithVersion ownedDocument(String id, boolean includeDeleted) {
         LibraryRepo.DocumentWithVersion document;
         try {
@@ -707,6 +805,8 @@ public class AgentController {
             return owner.equals(String.valueOf(stored)) || (stored == null && "default:default".equals(owner));
         } catch (RuntimeException ignored) { return false; }
     }
+
+    private static String text(Object value) { return value == null ? "" : String.valueOf(value); }
 
     @SuppressWarnings("unchecked")
     private List<ToolParam> toolParams(Map<String, Object> request) {
