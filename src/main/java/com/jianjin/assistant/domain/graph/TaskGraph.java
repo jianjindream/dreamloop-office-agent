@@ -94,6 +94,13 @@ public class TaskGraph {
                             "node " + n.getId() + " depends on nonexistent node " + dep);
                 }
             }
+            if (n.getDependencyMode() == DependencyMode.QUORUM
+                    && !n.getDependsOn().isEmpty()
+                    && n.getQuorum() > n.getDependsOn().size()) {
+                throw new IllegalStateException(
+                        "node " + n.getId() + " quorum " + n.getQuorum()
+                                + " exceeds dependency count " + n.getDependsOn().size());
+            }
         }
         for (Map.Entry<String, List<String>> entry : raceGroups().entrySet()) {
             Set<String> expected = null;
@@ -104,6 +111,15 @@ public class TaskGraph {
                 } else if (!expected.equals(dependencies)) {
                     throw new IllegalStateException(
                             "race group " + entry.getKey() + " must use identical dependencies");
+                }
+            }
+            Node first = nodes.get(entry.getValue().getFirst());
+            for (String id : entry.getValue()) {
+                Node candidate = nodes.get(id);
+                if (candidate.getDependencyMode() != first.getDependencyMode()
+                        || candidate.getQuorum() != first.getQuorum()) {
+                    throw new IllegalStateException(
+                            "race group " + entry.getKey() + " must use identical dependency policy");
                 }
             }
         }

@@ -5,7 +5,7 @@ import type { SearchResult, ServerMessage, ServerSession } from '@/types/api'
 
 export type MessageRole = 'user' | 'assistant'
 export type MessageStatus = 'complete' | 'streaming' | 'error' | 'stopped'
-export type ExecutionStatus = 'pending' | 'running' | 'success' | 'error'
+export type ExecutionStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped' | 'cancelled'
 
 export interface ExecutionEvent {
   id: string
@@ -268,9 +268,16 @@ export const useChatStore = defineStore('chat', {
     completeLatestTool(id: string, tool: string, detail: string, failed = false) {
       const message = this.findMessage(id)
       if (!message) return
-      const item = [...message.execution].reverse().find((e) => e.type === 'tool' && e.tool === tool)
+      const item = [...message.execution].reverse().find((e) => e.type === 'tool' && e.tool === tool && e.status === 'running')
       if (item) { item.status = failed ? 'error' : 'success'; item.detail = detail }
       else this.addExecution(id, { type: 'observation', title: tool + ' 已完成', detail, tool, status: failed ? 'error' : 'success' })
+    },
+    completeLatestToolWithStatus(id: string, tool: string, detail: string, status: ExecutionStatus) {
+      const message = this.findMessage(id)
+      if (!message) return
+      const item = [...message.execution].reverse().find((e) => e.type === 'tool' && e.tool === tool && e.status === 'running')
+      if (item) { item.status = status; item.detail = detail }
+      else this.addExecution(id, { type: 'observation', title: tool + ' 执行结束', detail, tool, status })
     },
     removeMessage(id: string) {
       for (const session of this.sessions) session.messages = session.messages.filter((m) => m.id !== id)

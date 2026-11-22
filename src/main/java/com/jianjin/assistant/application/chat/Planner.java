@@ -3,6 +3,8 @@ package com.jianjin.assistant.application.chat;
 import com.jianjin.assistant.application.chat.subagent.SubAgent;
 import com.jianjin.assistant.application.chat.subagent.SubAgentRegistry;
 import com.jianjin.assistant.config.AppConfig;
+import com.jianjin.assistant.domain.graph.DependencyMode;
+import com.jianjin.assistant.domain.graph.FailurePolicy;
 import com.jianjin.assistant.domain.graph.Node;
 import com.jianjin.assistant.domain.graph.NodeType;
 import com.jianjin.assistant.model.Tool;
@@ -16,6 +18,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class Planner {
 
@@ -177,6 +180,10 @@ public class Planner {
                 - rag_search 是内部/私有知识来源，不与公开网络搜索源竞速；需要内外部资料时让它独立并行，最终聚合
                 - 实时信息优先使用公开网络搜索工具，内部/私有知识优先使用 rag_search
                 - 无依赖关系的节点不要互相等待，depends_on 设为 []
+                - dependency_mode 可选 ALL、ANY、QUORUM、OPTIONAL；默认 ALL。QUORUM 还要给出 quorum
+                - required_output 只标记用户最终要求且不可缺少的交付物；普通增强节点设为 false
+                - failure_policy 可选 BLOCK_BRANCH、CONTINUE_DEGRADED、FAIL_FAST；只有不可替代的关键节点才使用 FAIL_FAST
+                - 竞速组单个成员不是关键节点；如果整个竞速结果不可缺少，可将组内成员都设 required_output=true，但不要对单个成员设置 FAIL_FAST
                 - 需要研究、总结、报告、写文档时，优先使用 research_agent / writer_agent / review_agent / doc_agent 组合
                 - doc_agent 负责把上游内容保存到本地文档库并写入 RAG
 
@@ -188,7 +195,7 @@ public class Planner {
                 %s
 
                 请以 JSON 数组格式输出执行计划：
-                [{"id":"n1","type":"sub_agent","agent":"research_agent","goal":"研究目标","params":{},"reason":"一句话说明为什么调用","depends_on":[],"race_group":""}]
+                [{"id":"n1","type":"sub_agent","agent":"research_agent","goal":"研究目标","params":{},"reason":"一句话说明为什么调用","depends_on":[],"dependency_mode":"ALL","quorum":1,"race_group":"","required_output":true,"failure_policy":"FAIL_FAST"}]
                 如果无需工具直接回答，输出 []。只输出 JSON，不要其他内容.""",
                 query, toolLines, agentLines.length() == 0 ? "（无）" : agentLines);
 
@@ -257,11 +264,14 @@ public class Planner {
                     rg = "";
                 }
 
-                if (nodeType == NodeType.SUB_AGENT) {
-                    result.add(Node.subAgent(id, name, agent, goal, deps, rg));
-                } else {
-                    result.add(new Node(id, NodeType.TOOL, name, tool, params, deps, rg));
-                }
+                Node node = nodeType == NodeType.SUB_AGENT
+                        ? Node.subAgent(id, name, agent, goal, deps, rg)
+                        : new Node(id, NodeType.TOOL, name, tool, params, deps, rg);
+                node.setDependencyMode(DependencyMode.fromValue(item.get("dependency_mode")));
+                node.setQuorum(intValue(item.get("quorum"), 1));
+                node.setRequiredOutput(booleanValue(item.get("required_output"), false));
+                node.setFailurePolicy(FailurePolicy.fromValue(item.get("failure_policy")));
+                result.add(node);
             }
             if (!result.isEmpty()) return result;
         } catch (Exception ignored) { /* fall through */ }
@@ -345,6 +355,7 @@ public class Planner {
                         "doc_agent", "保存报告到本地文档库并写入 RAG",
                         new ArrayList<>(List.of(writerID, reviewID)), ""));
             }
+            markRequiredOutput(wantsDocumentWrite(q) ? nodes.getLast() : nodes.get(1), true);
             return nodes;
         }
 
@@ -420,7 +431,52 @@ public class Planner {
             nodes.add(new Node(nextID.get(), NodeType.TOOL, "调用工具 " + e.getKey(), e.getKey(),
                     params, new ArrayList<>(), ""));
         }
+        applyRuleOutputPolicies(nodes);
         return nodes;
+    }
+
+    private static void applyRuleOutputPolicies(List<Node> nodes) {
+        if (nodes == null || nodes.isEmpty()) return;
+        Set<String> dependedOn = new java.util.HashSet<>();
+        for (Node node : nodes) dependedOn.addAll(node.getDependsOn());
+        List<Node> sinks = nodes.stream().filter(n -> !dependedOn.contains(n.getId())).toList();
+
+        // 单一执行目标（单节点或一个竞速组）失败后已经没有可用答案，应视为关键输出。
+        Set<String> units = new java.util.LinkedHashSet<>();
+        for (Node sink : sinks) {
+            units.add(sink.getRaceGroup().isEmpty() ? "node:" + sink.getId() : "race:" + sink.getRaceGroup());
+        }
+        if (units.size() == 1) {
+            for (Node sink : sinks) markRequiredOutput(sink, sink.getRaceGroup().isEmpty());
+            return;
+        }
+
+        // 明确的动作型工具分别对应用户交付物；多来源检索则允许部分成功后降级聚合。
+        for (Node sink : sinks) {
+            String tool = sink.getToolName() == null ? "" : sink.getToolName();
+            boolean retrieval = tool.contains("search") || tool.contains("rag") || tool.contains("retriev");
+            if (!retrieval) markRequiredOutput(sink, true);
+        }
+    }
+
+    private static void markRequiredOutput(Node node, boolean failFast) {
+        node.setRequiredOutput(true);
+        node.setFailurePolicy(failFast ? FailurePolicy.FAIL_FAST : FailurePolicy.BLOCK_BRANCH);
+    }
+
+    private static boolean booleanValue(Object value, boolean fallback) {
+        if (value == null) return fallback;
+        if (value instanceof Boolean b) return b;
+        String text = value.toString().trim();
+        if ("true".equalsIgnoreCase(text)) return true;
+        if ("false".equalsIgnoreCase(text)) return false;
+        return fallback;
+    }
+
+    private static int intValue(Object value, int fallback) {
+        if (value == null) return fallback;
+        try { return Integer.parseInt(value.toString()); }
+        catch (NumberFormatException ignored) { return fallback; }
     }
 
     /** 命中"研究/调研/总结/报告/文档/方案/分析"任一关键词，就走 sub-agent 链路。 */

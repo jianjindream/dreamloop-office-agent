@@ -89,10 +89,16 @@ public class StreamEvent {
 
     /** 节点完成：data = {id, tool, status} */
     public static StreamEvent nodeDone(String id, String tool, String status) {
+        return nodeDone(id, tool, status, "");
+    }
+
+    /** 节点完成，附带结构化错误，前端无需解析 observation 文案。 */
+    public static StreamEvent nodeDone(String id, String tool, String status, String error) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", id == null ? "" : id);
         m.put("tool", tool == null ? "" : tool);
         m.put("status", status == null ? "" : status);
+        m.put("error", error == null ? "" : error);
         return new StreamEvent("node_done", m);
     }
 

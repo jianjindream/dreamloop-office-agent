@@ -1,6 +1,8 @@
 package com.jianjin.assistant.application.chat;
 
 import com.jianjin.assistant.config.AppConfig;
+import com.jianjin.assistant.domain.graph.DependencyMode;
+import com.jianjin.assistant.domain.graph.FailurePolicy;
 import com.jianjin.assistant.domain.graph.Node;
 import com.jianjin.assistant.domain.graph.NodeStatus;
 import com.jianjin.assistant.domain.graph.NodeType;
@@ -221,6 +223,160 @@ class GraphRuntimeTest {
         assertTrue(second.getError().contains("n1(failed)"));
         assertTrue(result.observations.stream().anyMatch(s -> s.contains("upstream boom")));
         assertTrue(result.observations.stream().anyMatch(s -> s.contains("上游依赖未成功")));
+        assertEquals(GraphRuntime.GraphOutcome.FAILED, result.outcome);
+    }
+
+    @Test
+    void failedAllDependencySkipsDescendantWithoutWaitingForOtherSlowDependency() throws Exception {
+        CountDownLatch releaseSlow = new CountDownLatch(1);
+        CountDownLatch descendantSkipped = new CountDownLatch(1);
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("fail", new Tool("fail", "", List.of(), params -> {
+            throw new RuntimeException("boom");
+        }));
+        tools.put("slow", new Tool("slow", "", List.of(), params -> {
+            try { releaseSlow.await(2, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return "slow";
+        }));
+        tools.put("consumer", new Tool("consumer", "", List.of(), params -> "must-not-run"));
+
+        Node failed = new Node("n1", NodeType.TOOL, "fail", "fail", new HashMap<>(), List.of(), "");
+        Node slow = new Node("n2", NodeType.TOOL, "slow", "slow", new HashMap<>(), List.of(), "");
+        Node consumer = new Node("n3", NodeType.TOOL, "consumer", "consumer",
+                new HashMap<>(), List.of("n1", "n2"), "");
+        TaskGraph graph = new TaskGraph(List.of(failed, slow, consumer));
+
+        Thread execution = Thread.ofVirtual().start(() -> new GraphRuntime(graph, minimalCfg(),
+                GraphRuntime.Config.from(minimalCfg()), tools, new AtomicBoolean(false), event -> {
+                    if ("node_done".equals(event.type()) && event.data() instanceof Map<?, ?> data
+                            && "n3".equals(data.get("id")) && "skipped".equals(data.get("status"))) {
+                        descendantSkipped.countDown();
+                    }
+                }).execute());
+
+        assertTrue(descendantSkipped.await(1, TimeUnit.SECONDS),
+                "descendant should be skipped as soon as one mandatory dependency fails");
+        assertNotEquals(NodeStatus.DONE, slow.getStatus());
+        releaseSlow.countDown();
+        execution.join(2000);
+        assertEquals(NodeStatus.SKIPPED, consumer.getStatus());
+    }
+
+    @Test
+    void failFastNodeCancelsIndependentSlowBranch() {
+        CountDownLatch slowStarted = new CountDownLatch(1);
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("critical", new Tool("critical", "", List.of(), params -> {
+            try { slowStarted.await(1, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            throw new RuntimeException("critical boom");
+        }));
+        tools.put("slow", new Tool("slow", "", List.of(), params -> {
+            slowStarted.countDown();
+            try { Thread.sleep(5000); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException("interrupted"); }
+            return "late";
+        }));
+        Node critical = new Node("n1", NodeType.TOOL, "critical", "critical",
+                new HashMap<>(), List.of(), "");
+        critical.setFailurePolicy(FailurePolicy.FAIL_FAST);
+        Node slow = new Node("n2", NodeType.TOOL, "slow", "slow", new HashMap<>(), List.of(), "");
+
+        long startedAt = System.nanoTime();
+        GraphRuntime.GraphResult result = new GraphRuntime(new TaskGraph(List.of(critical, slow)),
+                minimalCfg(), GraphRuntime.Config.from(minimalCfg()), tools,
+                new AtomicBoolean(false), event -> {}).execute();
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+
+        assertEquals(GraphRuntime.GraphOutcome.FAILED, result.outcome);
+        assertFalse(result.interrupted);
+        assertTrue(result.failureReason.contains("关键节点"));
+        assertTrue(elapsedMs < 1500, "critical failure should not wait for the slow branch");
+        assertEquals(NodeStatus.CANCELLED, slow.getStatus());
+    }
+
+    @Test
+    void unreachableRequiredOutputCancelsIndependentSlowBranch() {
+        CountDownLatch slowStarted = new CountDownLatch(1);
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("source", new Tool("source", "", List.of(), params -> {
+            try { slowStarted.await(1, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            throw new RuntimeException("source boom");
+        }));
+        tools.put("output", new Tool("output", "", List.of(), params -> "output"));
+        tools.put("slow", new Tool("slow", "", List.of(), params -> {
+            slowStarted.countDown();
+            try { Thread.sleep(5000); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException("interrupted"); }
+            return "late";
+        }));
+        Node source = new Node("n1", NodeType.TOOL, "source", "source", new HashMap<>(), List.of(), "");
+        Node output = new Node("n2", NodeType.TOOL, "output", "output",
+                new HashMap<>(), List.of("n1"), "");
+        output.setRequiredOutput(true);
+        Node slow = new Node("n3", NodeType.TOOL, "slow", "slow", new HashMap<>(), List.of(), "");
+
+        GraphRuntime.GraphResult result = new GraphRuntime(new TaskGraph(List.of(source, output, slow)),
+                minimalCfg(), GraphRuntime.Config.from(minimalCfg()), tools,
+                new AtomicBoolean(false), event -> {}).execute();
+
+        assertEquals(GraphRuntime.GraphOutcome.FAILED, result.outcome);
+        assertTrue(result.failureReason.contains("必需输出"));
+        assertEquals(NodeStatus.SKIPPED, output.getStatus());
+        assertEquals(NodeStatus.CANCELLED, slow.getStatus());
+    }
+
+    @Test
+    void anyDependencyStartsAfterFirstSuccess() {
+        CountDownLatch consumerRan = new CountDownLatch(1);
+        AtomicBoolean slowReleasedByConsumer = new AtomicBoolean(false);
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("fast", new Tool("fast", "", List.of(), params -> "fast"));
+        tools.put("slow", new Tool("slow", "", List.of(), params -> {
+            try { slowReleasedByConsumer.set(consumerRan.await(1, TimeUnit.SECONDS)); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return "slow";
+        }));
+        tools.put("consumer", new Tool("consumer", "", List.of(), params -> {
+            consumerRan.countDown();
+            return "combined";
+        }));
+        Node fast = new Node("n1", NodeType.TOOL, "fast", "fast", new HashMap<>(), List.of(), "");
+        Node slow = new Node("n2", NodeType.TOOL, "slow", "slow", new HashMap<>(), List.of(), "");
+        Node consumer = new Node("n3", NodeType.TOOL, "consumer", "consumer",
+                new HashMap<>(), List.of("n1", "n2"), "");
+        consumer.setDependencyMode(DependencyMode.ANY);
+
+        new GraphRuntime(new TaskGraph(List.of(fast, slow, consumer)), minimalCfg(),
+                GraphRuntime.Config.from(minimalCfg()), tools, new AtomicBoolean(false), event -> {}).execute();
+
+        assertTrue(slowReleasedByConsumer.get(), "ANY consumer should not wait for every dependency");
+        assertEquals(NodeStatus.DONE, consumer.getStatus());
+    }
+
+    @Test
+    void quorumDependencyRunsWhenThresholdIsReached() {
+        Map<String, Tool> tools = new HashMap<>();
+        tools.put("ok-a", new Tool("ok-a", "", List.of(), params -> "a"));
+        tools.put("ok-b", new Tool("ok-b", "", List.of(), params -> "b"));
+        tools.put("fail", new Tool("fail", "", List.of(), params -> { throw new RuntimeException("boom"); }));
+        tools.put("consumer", new Tool("consumer", "", List.of(), params -> "combined"));
+        Node a = new Node("n1", NodeType.TOOL, "a", "ok-a", new HashMap<>(), List.of(), "");
+        Node b = new Node("n2", NodeType.TOOL, "b", "ok-b", new HashMap<>(), List.of(), "");
+        Node failed = new Node("n3", NodeType.TOOL, "failed", "fail", new HashMap<>(), List.of(), "");
+        Node consumer = new Node("n4", NodeType.TOOL, "consumer", "consumer",
+                new HashMap<>(), List.of("n1", "n2", "n3"), "");
+        consumer.setDependencyMode(DependencyMode.QUORUM);
+        consumer.setQuorum(2);
+
+        GraphRuntime.GraphResult result = new GraphRuntime(new TaskGraph(List.of(a, b, failed, consumer)),
+                minimalCfg(), GraphRuntime.Config.from(minimalCfg()), tools,
+                new AtomicBoolean(false), event -> {}).execute();
+
+        assertEquals(NodeStatus.DONE, consumer.getStatus());
+        assertEquals(GraphRuntime.GraphOutcome.PARTIAL_SUCCESS, result.outcome);
     }
 
     @Test

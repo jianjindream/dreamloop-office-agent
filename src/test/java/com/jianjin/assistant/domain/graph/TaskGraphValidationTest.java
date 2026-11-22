@@ -10,6 +10,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class TaskGraphValidationTest {
 
     @Test
+    void rejectsQuorumLargerThanDependencyCount() {
+        Node source = new Node("n1", NodeType.TOOL, "source", "source",
+                new HashMap<>(), List.of(), "");
+        Node consumer = new Node("n2", NodeType.TOOL, "consumer", "consumer",
+                new HashMap<>(), List.of("n1"), "");
+        consumer.setDependencyMode(DependencyMode.QUORUM);
+        consumer.setQuorum(2);
+
+        TaskGraph graph = new TaskGraph(List.of(source, consumer));
+        assertThrows(IllegalStateException.class, graph::validate);
+    }
+
+    @Test
     void rejectsDuplicateNodeIds() {
         Node first = new Node("n1", NodeType.TOOL, "first", "first",
                 new HashMap<>(), List.of(), "");

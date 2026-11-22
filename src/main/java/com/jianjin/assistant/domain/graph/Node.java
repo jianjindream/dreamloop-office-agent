@@ -20,6 +20,14 @@ public class Node {
     private List<String> dependsOn = new ArrayList<>();
     /** 空字符串=独立；同 group 表示竞速组 */
     private String raceGroup = "";
+    /** 是否是用户最终要求的必需交付物。 */
+    private boolean requiredOutput;
+    /** 多个直接依赖如何满足；默认保持原有的 ALL 语义。 */
+    private DependencyMode dependencyMode = DependencyMode.ALL;
+    /** QUORUM 模式所需的最少成功依赖数。 */
+    private int quorum = 1;
+    /** 节点失败后的策略；默认只阻断当前分支。 */
+    private FailurePolicy failurePolicy = FailurePolicy.BLOCK_BRANCH;
     private NodeStatus status = NodeStatus.PENDING;
     private String result = "";
     private String error = "";
@@ -69,6 +77,18 @@ public class Node {
     public void setDependsOn(List<String> dependsOn) { this.dependsOn = dependsOn == null ? new ArrayList<>() : dependsOn; }
     public String getRaceGroup() { return raceGroup; }
     public void setRaceGroup(String raceGroup) { this.raceGroup = raceGroup == null ? "" : raceGroup; }
+    public boolean isRequiredOutput() { return requiredOutput; }
+    public void setRequiredOutput(boolean requiredOutput) { this.requiredOutput = requiredOutput; }
+    public DependencyMode getDependencyMode() { return dependencyMode; }
+    public void setDependencyMode(DependencyMode dependencyMode) {
+        this.dependencyMode = dependencyMode == null ? DependencyMode.ALL : dependencyMode;
+    }
+    public int getQuorum() { return quorum; }
+    public void setQuorum(int quorum) { this.quorum = Math.max(1, quorum); }
+    public FailurePolicy getFailurePolicy() { return failurePolicy; }
+    public void setFailurePolicy(FailurePolicy failurePolicy) {
+        this.failurePolicy = failurePolicy == null ? FailurePolicy.BLOCK_BRANCH : failurePolicy;
+    }
     public NodeStatus getStatus() { return status; }
     public void setStatus(NodeStatus status) { this.status = status; }
     public String getResult() { return result; }

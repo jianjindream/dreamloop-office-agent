@@ -20,7 +20,7 @@ import {
 } from 'lucide-vue-next'
 import { agentApi } from '@/api/agent'
 import ChatMessageView from '@/components/chat/ChatMessage.vue'
-import { useChatStore, type ChatMessage } from '@/stores/chat'
+import { useChatStore, type ChatMessage, type ExecutionStatus } from '@/stores/chat'
 import { useDocumentCanvasStore } from '@/stores/documentCanvas'
 import { useWorkspaceStore } from '@/stores/workspace'
 import type { ChatResponse, ChatStreamEvent, SearchResult, ToolSummary } from '@/types/api'
@@ -114,7 +114,7 @@ const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
     case 'observation': {
       const tool = String(data.tool ?? '工具')
       const result = String(data.result ?? '')
-      chat.completeLatestTool(messageId, tool, result, result.includes('失败'))
+      chat.completeLatestTool(messageId, tool, result, result.includes('失败') || result.includes('未成功'))
       break
     }
     case 'rag_result':
@@ -130,7 +130,15 @@ const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
       chat.addExecution(messageId, { type: 'tool', title: `正在执行 ${String(data.tool ?? data.id ?? '任务')}`, tool: String(data.tool ?? ''), status: 'running' })
       break
     case 'node_done':
-      chat.completeLatestTool(messageId, String(data.tool ?? ''), `执行状态：${String(data.status ?? 'done')}`)
+      {
+        const nodeStatus = String(data.status ?? 'done')
+        const displayStatus: ExecutionStatus = nodeStatus === 'failed' ? 'error'
+          : nodeStatus === 'skipped' ? 'skipped'
+            : nodeStatus === 'cancelled' ? 'cancelled' : 'success'
+        const error = String(data.error ?? '')
+        chat.completeLatestToolWithStatus(messageId, String(data.tool ?? ''),
+          error || `执行状态：${nodeStatus}`, displayStatus)
+      }
       break
     case 'race_won':
       chat.addExecution(messageId, {
@@ -148,7 +156,7 @@ const handleStreamEvent = (messageId: string, event: ChatStreamEvent) => {
         mode: response.mode ?? assistant.mode,
         sources: response.search_results ?? assistant.sources,
         extractedInfo: response.extracted_info,
-        status: response.interrupted ? 'stopped' : 'complete',
+        status: response.interrupted ? 'stopped' : response.graph_outcome === 'failed' ? 'error' : 'complete',
       })
       break
     }

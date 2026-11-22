@@ -43,6 +43,8 @@ class PlannerSubAgentRuleTest {
             assertEquals(NodeType.SUB_AGENT, nodes.get(i).getType(), "node " + i + " type");
             assertEquals(want[i], nodes.get(i).getAgentName(), "node " + i + " agent");
         }
+        assertTrue(nodes.get(1).isRequiredOutput());
+        assertFalse(nodes.getLast().isRequiredOutput());
     }
 
     @Test
@@ -55,6 +57,9 @@ class PlannerSubAgentRuleTest {
             assertEquals(NodeType.SUB_AGENT, nodes.get(i).getType());
             assertEquals(want[i], nodes.get(i).getAgentName());
         }
+        assertTrue(nodes.getLast().isRequiredOutput());
+        assertEquals(com.jianjin.assistant.domain.graph.FailurePolicy.FAIL_FAST,
+                nodes.getLast().getFailurePolicy());
     }
 
     @Test
@@ -85,6 +90,7 @@ class PlannerSubAgentRuleTest {
 
         assertEquals(4, nodes.size());
         assertTrue(nodes.stream().allMatch(n -> "web_search".equals(n.getRaceGroup())));
+        assertTrue(nodes.stream().allMatch(Node::isRequiredOutput));
         assertTrue(nodes.stream().noneMatch(n -> "rag_search".equals(n.getToolName())));
     }
 

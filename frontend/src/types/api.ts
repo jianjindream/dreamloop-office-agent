@@ -322,6 +322,7 @@ export interface ChatResponse {
   search_results?: SearchResult[]
   extracted_info?: string
   interrupted?: boolean
+  graph_outcome?: 'success' | 'partial_success' | 'failed' | 'interrupted'
 }
 
 export type StreamEventType =

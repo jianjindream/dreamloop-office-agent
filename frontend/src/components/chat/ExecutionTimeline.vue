@@ -24,7 +24,7 @@ const summary = computed(() => {
       <div v-for="event in events" :key="event.id" class="timeline-row">
         <span class="timeline-status" :class="event.status">
           <LoaderCircle v-if="event.status === 'running'" class="spinning" :size="12" />
-          <CircleAlert v-else-if="event.status === 'error'" :size="12" />
+          <CircleAlert v-else-if="event.status === 'error' || event.status === 'cancelled'" :size="12" />
           <Wrench v-else-if="event.type === 'tool'" :size="12" />
           <Check v-else :size="12" />
         </span>
@@ -41,7 +41,7 @@ const summary = computed(() => {
 .execution-summary > span:nth-child(2) { display: flex; min-width: 0; flex: 1; flex-direction: column; }.execution-summary strong { overflow: hidden; color: var(--text); font-size: 9px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }.execution-summary small { margin-top: 2px; color: var(--text-faint); font-size: 7px; }.execution-summary > svg { color: var(--text-faint); transition: 150ms; }.open .execution-summary > svg:not(.spinning) { transform: rotate(180deg); }
 .timeline { padding: 3px 12px 12px 23px; border-top: 1px solid var(--border); }
 .timeline-row { position: relative; display: flex; gap: 9px; padding-top: 12px; }.timeline-row:not(:last-child)::after { position: absolute; top: 30px; bottom: -9px; left: 9px; width: 1px; background: var(--border); content: ''; }
-.timeline-status { position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 19px; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-elevated); color: var(--text-faint); }.timeline-status.success { border-color: color-mix(in srgb,var(--success) 30%,var(--border)); background: var(--success-soft); color: var(--success); }.timeline-status.running { color: var(--brand); }.timeline-status.error { color: var(--danger); }
+.timeline-status { position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 19px; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-elevated); color: var(--text-faint); }.timeline-status.success { border-color: color-mix(in srgb,var(--success) 30%,var(--border)); background: var(--success-soft); color: var(--success); }.timeline-status.running { color: var(--brand); }.timeline-status.error,.timeline-status.cancelled { color: var(--danger); }.timeline-status.skipped { color: var(--text-muted); }
 .timeline-row > div { min-width: 0; padding-top: 2px; }.timeline-row strong { color: var(--text); font-size: 9px; font-weight: 610; }.timeline-row p { display: -webkit-box; margin: 4px 0 0; overflow: hidden; color: var(--text-faint); font-size: 8px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .spinning { animation: spin 1s linear infinite; }@keyframes spin{to{transform:rotate(360deg)}}
 </style>

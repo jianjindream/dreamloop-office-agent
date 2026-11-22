@@ -80,9 +80,18 @@ public class GraphRuntime {
     public static class GraphResult {
         public List<String> observations = new ArrayList<>();
         public Map<String, NodeResult> nodeResults = new LinkedHashMap<>();
+        public GraphOutcome outcome = GraphOutcome.SUCCESS;
+        public String failureReason = "";
         public boolean interrupted;
         public String interruptedAt = "";
         public String interruptedMsg = "";
+    }
+
+    public enum GraphOutcome {
+        SUCCESS,
+        PARTIAL_SUCCESS,
+        FAILED,
+        INTERRUPTED
     }
 
     private final TaskGraph graph;
@@ -100,6 +109,9 @@ public class GraphRuntime {
     private final Map<String, String> errors = new LinkedHashMap<>();
     private final Consumer<StreamEvent> onEvent;
     private final AtomicBoolean cancelled;
+    /** 框架内部的关键路径终止；不能与用户主动取消混为一谈。 */
+    private final AtomicBoolean fatalAborted = new AtomicBoolean(false);
+    private volatile String fatalReason = "";
     private final Set<Future<?>> activeInvocations = ConcurrentHashMap.newKeySet();
     private ExecutorService invocationExecutor;
 
@@ -152,8 +164,8 @@ public class GraphRuntime {
         } catch (Exception e) {
             log.warn("GraphRuntime: 图校验失败 {}", e.getMessage());
             GraphResult r = new GraphResult();
-            r.interrupted = true;
-            r.interruptedMsg = "图校验失败: " + e.getMessage();
+            r.outcome = GraphOutcome.FAILED;
+            r.failureReason = "图校验失败: " + e.getMessage();
             return r;
         }
 
@@ -165,38 +177,30 @@ public class GraphRuntime {
             v.put("id", n.getId()); v.put("tool", n.getToolName());
             v.put("name", n.getName()); v.put("depends_on", n.getDependsOn());
             v.put("race_group", n.getRaceGroup()); v.put("status", n.getStatus().value());
+            v.put("dependency_mode", n.getDependencyMode().name());
+            v.put("quorum", n.getQuorum());
+            v.put("required_output", n.isRequiredOutput());
+            v.put("failure_policy", n.getFailurePolicy().name());
             nodeView.put(e.getKey(), v);
         }
         safeEmit(StreamEvent.graphReady(levels, nodeView));
 
         Map<String, ExecutionUnit> units = buildExecutionUnits();
-        Map<String, Integer> remainingDependencies = new LinkedHashMap<>();
-        Map<String, List<String>> downstream = new LinkedHashMap<>();
-        for (ExecutionUnit unit : units.values()) {
-            remainingDependencies.put(unit.id, unit.dependencies.size());
-            downstream.put(unit.id, new ArrayList<>());
-        }
-        for (ExecutionUnit unit : units.values()) {
-            for (String dependency : unit.dependencies) {
-                downstream.get(dependency).add(unit.id);
-            }
-        }
 
         ExecutorService scheduler = Executors.newVirtualThreadPerTaskExecutor();
         invocationExecutor = Executors.newVirtualThreadPerTaskExecutor();
         CompletionService<String> completions = new ExecutorCompletionService<>(scheduler);
         Map<Future<String>, String> scheduled = new LinkedHashMap<>();
         Set<String> submitted = new HashSet<>();
-        int completed = 0;
+        Set<String> settled = new HashSet<>();
         try {
-            for (ExecutionUnit unit : units.values()) {
-                if (remainingDependencies.get(unit.id) == 0) {
-                    submitUnit(unit, completions, scheduled, submitted);
-                }
-            }
-            while (completed < units.size()) {
+            advanceUnits(units, completions, scheduled, submitted, settled);
+            while (settled.size() < units.size()) {
                 if (cancelled.get()) {
                     return interrupted("图执行被用户中断");
+                }
+                if (fatalAborted.get()) {
+                    return failedResult(fatalReason);
                 }
                 Future<String> finished;
                 try {
@@ -216,16 +220,16 @@ public class GraphRuntime {
                     unitId = scheduled.get(finished);
                     failUnit(units.get(unitId), rootMessage(e));
                 }
-                completed++;
-                for (String childId : downstream.getOrDefault(unitId, List.of())) {
-                    int left = remainingDependencies.merge(childId, -1, Integer::sum);
-                    if (left == 0) {
-                        submitUnit(units.get(childId), completions, scheduled, submitted);
-                    }
+                if (unitId != null) settled.add(unitId);
+                advanceUnits(units, completions, scheduled, submitted, settled);
+                String criticalFailure = criticalFailureReason();
+                if (!criticalFailure.isEmpty()) {
+                    abortForCriticalFailure(criticalFailure);
+                    return failedResult(criticalFailure);
                 }
             }
         } finally {
-            if (cancelled.get()) scheduled.keySet().forEach(future -> future.cancel(true));
+            if (stopRequested()) scheduled.keySet().forEach(future -> future.cancel(true));
             scheduler.shutdownNow();
             cancelActiveInvocations();
             invocationExecutor.shutdownNow();
@@ -299,12 +303,6 @@ public class GraphRuntime {
     }
 
     private void runUnit(ExecutionUnit unit) {
-        for (String nodeId : unit.nodeIds) {
-            if (!dependenciesSucceeded(nodeId)) {
-                unit.nodeIds.forEach(this::skipForFailedDependencies);
-                return;
-            }
-        }
         if (!unit.raceGroup.isEmpty() && unit.nodeIds.size() > 1) {
             runRace(new RaceGroup(unit.raceGroup, unit.nodeIds));
         } else {
@@ -317,6 +315,129 @@ public class GraphRuntime {
         for (String nodeId : unit.nodeIds) {
             applyAttempt(RaceAttempt.failed(nodeId, message));
         }
+    }
+
+    private enum DependencyDecision { WAIT, READY, IMPOSSIBLE }
+
+    /**
+     * 扫描尚未提交的执行单元：满足条件的立即提交，已经不可能满足的立即跳过。
+     * 重复扫描可以在一次失败后把整条不可达后继链立刻结算，无需等待其他慢依赖。
+     */
+    private void advanceUnits(Map<String, ExecutionUnit> units,
+                              CompletionService<String> completions,
+                              Map<Future<String>, String> scheduled,
+                              Set<String> submitted, Set<String> settled) {
+        boolean changed;
+        do {
+            changed = false;
+            for (ExecutionUnit unit : units.values()) {
+                if (submitted.contains(unit.id) || settled.contains(unit.id)) continue;
+                DependencyDecision decision = dependencyDecision(unit);
+                if (decision == DependencyDecision.READY) {
+                    submitUnit(unit, completions, scheduled, submitted);
+                    changed = true;
+                } else if (decision == DependencyDecision.IMPOSSIBLE) {
+                    unit.nodeIds.forEach(this::skipForFailedDependencies);
+                    settled.add(unit.id);
+                    changed = true;
+                }
+            }
+        } while (changed);
+    }
+
+    private DependencyDecision dependencyDecision(ExecutionUnit unit) {
+        DependencyDecision result = DependencyDecision.READY;
+        for (String nodeId : unit.nodeIds) {
+            Node node = graph.getNodes().get(nodeId);
+            DependencyDecision current = dependencyDecision(node);
+            if (current == DependencyDecision.IMPOSSIBLE) return current;
+            if (current == DependencyDecision.WAIT) result = current;
+        }
+        return result;
+    }
+
+    private DependencyDecision dependencyDecision(Node node) {
+        if (node == null || node.getDependsOn() == null || node.getDependsOn().isEmpty()) {
+            return DependencyDecision.READY;
+        }
+        int success = 0;
+        int terminal = 0;
+        for (String depId : node.getDependsOn()) {
+            Node dep = graph.getNodes().get(depId);
+            if (successfulDependency(dep) != null) success++;
+            if (isTerminal(dep)) terminal++;
+        }
+        int total = node.getDependsOn().size();
+        int possible = success + (total - terminal);
+        return switch (node.getDependencyMode()) {
+            case ALL -> success == total ? DependencyDecision.READY
+                    : possible < total ? DependencyDecision.IMPOSSIBLE : DependencyDecision.WAIT;
+            case ANY -> success > 0 ? DependencyDecision.READY
+                    : terminal == total ? DependencyDecision.IMPOSSIBLE : DependencyDecision.WAIT;
+            case QUORUM -> {
+                int needed = Math.min(Math.max(1, node.getQuorum()), total);
+                yield success >= needed ? DependencyDecision.READY
+                        : possible < needed ? DependencyDecision.IMPOSSIBLE : DependencyDecision.WAIT;
+            }
+            case OPTIONAL -> terminal == total ? DependencyDecision.READY : DependencyDecision.WAIT;
+        };
+    }
+
+    private static boolean isTerminal(Node node) {
+        if (node == null) return true;
+        return switch (node.getStatus()) {
+            case DONE, FAILED, SKIPPED, CANCELLED -> true;
+            case PENDING, RUNNING -> false;
+        };
+    }
+
+    private String criticalFailureReason() {
+        for (Node node : graph.getNodes().values()) {
+            if (node.getStatus() == NodeStatus.FAILED
+                    && node.getFailurePolicy() == com.jianjin.assistant.domain.graph.FailurePolicy.FAIL_FAST) {
+                return "关键节点 " + node.getId() + "(" + node.executorName() + ") 失败: " + node.getError();
+            }
+        }
+        for (Node node : graph.getNodes().values()) {
+            if (!node.isRequiredOutput()) continue;
+            if (successfulDependency(node) != null) continue;
+            if (raceGroupStillViable(node)) continue;
+            if (isTerminal(node)) {
+                return "必需输出 " + node.getId() + "(" + node.executorName() + ") 已不可达"
+                        + (node.getError().isEmpty() ? "" : ": " + node.getError());
+            }
+        }
+        return "";
+    }
+
+    private boolean raceGroupStillViable(Node node) {
+        if (node.getRaceGroup() == null || node.getRaceGroup().isEmpty()) return false;
+        for (Node candidate : graph.getNodes().values()) {
+            if (node.getRaceGroup().equals(candidate.getRaceGroup()) && !isTerminal(candidate)) return true;
+        }
+        return false;
+    }
+
+    private void abortForCriticalFailure(String reason) {
+        fatalReason = reason == null ? "关键路径失败" : reason;
+        fatalAborted.set(true);
+        for (Node node : graph.getNodes().values()) {
+            if (node.getStatus() == NodeStatus.PENDING || node.getStatus() == NodeStatus.RUNNING) {
+                graph.setNodeStatus(node.getId(), NodeStatus.CANCELLED);
+                graph.setNodeError(node.getId(), "关键路径失败，已停止: " + fatalReason);
+                safeEmit(StreamEvent.nodeDone(node.getId(), node.executorName(),
+                        NodeStatus.CANCELLED.value(), node.getError()));
+            }
+        }
+        cancelActiveInvocations();
+    }
+
+    private boolean stopRequested() {
+        return cancelled.get() || fatalAborted.get();
+    }
+
+    private String stopReason() {
+        return cancelled.get() ? "被用户中断" : "关键路径失败，图执行已停止";
     }
 
     private static String rootMessage(Throwable error) {
@@ -340,7 +461,7 @@ public class GraphRuntime {
 
         for (String id : g.nodeIds) {
             Thread t = Thread.ofVirtual().name("race-" + g.raceGroup + "-" + id).unstarted(() -> {
-                if (raceClosed.get() || cancelled.get()) {
+                if (raceClosed.get() || stopRequested()) {
                     ch.offer(RaceAttempt.skipped(id, "竞速取消"));
                     return;
                 }
@@ -350,7 +471,7 @@ public class GraphRuntime {
                     return;
                 }
                 try {
-                    if (raceClosed.get() || cancelled.get()) {
+                    if (raceClosed.get() || stopRequested()) {
                         ch.offer(RaceAttempt.skipped(id, "竞速取消"));
                         return;
                     }
@@ -378,7 +499,7 @@ public class GraphRuntime {
         int collected = 0;
         try {
             while (collected < g.nodeIds.size()) {
-                if (cancelled.get()) break;
+                if (stopRequested()) break;
                 long now = System.nanoTime();
                 long effectiveDeadline = Math.min(deadline, qualifiedDeadline);
                 long left = effectiveDeadline - now;
@@ -424,6 +545,8 @@ public class GraphRuntime {
             Node winnerNode = graph.getNodes().get(winner.id);
             RaceEvaluation winnerEvaluation = evaluations.get(winner.id);
             applyAttempt(winner);
+            // 整图可能在竞速结算的同一时刻被关键失败终止；不得发送迟到的 DONE。
+            if (winnerNode.getStatus() != NodeStatus.DONE) return;
             safeEmit(StreamEvent.nodeDone(winner.id, winnerNode.executorName(), NodeStatus.DONE.value()));
             safeEmit(StreamEvent.raceWon(g.raceGroup, winner.id, winnerNode.executorName(),
                     winnerEvaluation == null ? 0.0 : winnerEvaluation.score,
@@ -433,6 +556,7 @@ public class GraphRuntime {
                 Node n = graph.getNodes().get(id);
                 if (!id.equals(winner.id)) {
                     synchronized (mu) {
+                        if (n.getStatus() == NodeStatus.CANCELLED) continue;
                         graph.setNodeStatus(id, NodeStatus.SKIPPED);
                         graph.setNodeResult(id, "");
                         graph.setNodeError(id, "");
@@ -443,8 +567,8 @@ public class GraphRuntime {
         } else {
             for (String id : g.nodeIds) {
                 RaceAttempt attempt = attempts.get(id);
-                if (cancelled.get()) {
-                    attempt = RaceAttempt.cancelled(id, "被用户中断");
+                if (stopRequested()) {
+                    attempt = RaceAttempt.cancelled(id, stopReason());
                 } else if (attempt == null || attempt.status == NodeStatus.SKIPPED) {
                     attempt = RaceAttempt.failed(id, "竞速超时（" + cfg.raceTimeoutMs + "ms）");
                 } else if (attempt.status == NodeStatus.DONE) {
@@ -454,7 +578,7 @@ public class GraphRuntime {
                 }
                 applyAttempt(attempt);
                 Node n = graph.getNodes().get(id);
-                safeEmit(StreamEvent.nodeDone(id, n.executorName(), n.getStatus().value()));
+                safeEmit(StreamEvent.nodeDone(id, n.executorName(), n.getStatus().value(), n.getError()));
                 if (n.getStatus() == NodeStatus.FAILED) {
                     safeEmit(StreamEvent.observation(n.executorName(), "执行失败: " + n.getError()));
                 }
@@ -561,7 +685,7 @@ public class GraphRuntime {
             RaceAttempt attempt = executeAttempt(nodeId, null);
             applyAttempt(attempt);
             Node node = graph.getNodes().get(nodeId);
-            safeEmit(StreamEvent.nodeDone(nodeId, node.executorName(), attempt.status.value()));
+            safeEmit(StreamEvent.nodeDone(nodeId, node.executorName(), attempt.status.value(), attempt.err));
             if (attempt.status == NodeStatus.DONE) {
                 safeEmit(StreamEvent.observation(node.executorName(), attempt.result));
             } else if (attempt.status == NodeStatus.FAILED) {
@@ -612,8 +736,8 @@ public class GraphRuntime {
                 && tools.get(node.getToolName()).isRetryable();
         int maxAttempts = retryable ? 1 + Math.max(0, maxRetries) : 1;
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            if (cancelled.get()) {
-                return RaceAttempt.cancelled(nodeId, "被用户中断");
+            if (stopRequested()) {
+                return RaceAttempt.cancelled(nodeId, stopReason());
             }
             if (stopFlag != null && stopFlag.get()) {
                 // 竞速：他人胜出 → 不再重试，直接返回让外层标 SKIPPED
@@ -628,8 +752,8 @@ public class GraphRuntime {
                 break;
             } catch (Exception e) {
                 lastErr = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-                if (cancelled.get()) {
-                    return RaceAttempt.cancelled(nodeId, "被用户中断");
+                if (stopRequested()) {
+                    return RaceAttempt.cancelled(nodeId, stopReason());
                 }
                 if (stopFlag != null && stopFlag.get()) {
                     return RaceAttempt.skipped(nodeId, "竞速取消");
@@ -739,17 +863,6 @@ public class GraphRuntime {
         return out;
     }
 
-    /** 只有所有直接依赖都成功时才允许调度当前节点。 */
-    private boolean dependenciesSucceeded(String nodeId) {
-        Node node = graph.getNodes().get(nodeId);
-        if (node == null || node.getDependsOn() == null) return true;
-        for (String depId : node.getDependsOn()) {
-            Node dep = graph.getNodes().get(depId);
-            if (successfulDependency(dep) == null) return false;
-        }
-        return true;
-    }
-
     /** 竞速落败节点由同组胜者代偿，因此仍可满足下游依赖。 */
     private Node successfulDependency(Node dep) {
         if (dep == null) return null;
@@ -783,7 +896,7 @@ public class GraphRuntime {
             graph.setNodeError(nodeId, msg);
             errors.put(nodeId, msg);
         }
-        safeEmit(StreamEvent.nodeDone(nodeId, node.executorName(), NodeStatus.SKIPPED.value()));
+        safeEmit(StreamEvent.nodeDone(nodeId, node.executorName(), NodeStatus.SKIPPED.value(), msg));
         safeEmit(StreamEvent.observation(node.executorName(), msg));
     }
 
@@ -865,11 +978,35 @@ public class GraphRuntime {
     private GraphResult buildResult() {
         GraphResult r = new GraphResult();
         r.observations = graph.executionSummaries();
+        int done = 0;
+        boolean degraded = false;
         for (Map.Entry<String, Node> e : graph.getNodes().entrySet()) {
             Node n = e.getValue();
             r.nodeResults.put(e.getKey(), new NodeResult(n.getStatus(), n.getResult(), n.getError()));
+            if (n.getStatus() == NodeStatus.DONE) done++;
+            if (n.getStatus() == NodeStatus.FAILED
+                    || n.getStatus() == NodeStatus.CANCELLED
+                    || (n.getStatus() == NodeStatus.SKIPPED && !n.getError().isEmpty())) {
+                degraded = true;
+                if (r.failureReason.isEmpty() && !n.getError().isEmpty()) r.failureReason = n.getError();
+            }
+        }
+        if (fatalAborted.get()) {
+            r.outcome = GraphOutcome.FAILED;
+            r.failureReason = fatalReason;
+        } else if (degraded && done == 0) {
+            r.outcome = GraphOutcome.FAILED;
+        } else if (degraded) {
+            r.outcome = GraphOutcome.PARTIAL_SUCCESS;
         }
         return r;
+    }
+
+    private GraphResult failedResult(String reason) {
+        GraphResult result = buildResult();
+        result.outcome = GraphOutcome.FAILED;
+        result.failureReason = reason == null ? "关键路径失败" : reason;
+        return result;
     }
 
     private GraphResult interrupted(String msg) {
@@ -880,6 +1017,7 @@ public class GraphRuntime {
             }
         }
         GraphResult r = buildResult();
+        r.outcome = GraphOutcome.INTERRUPTED;
         r.interrupted = true;
         r.interruptedMsg = msg;
         return r;
@@ -907,5 +1045,18 @@ public class GraphRuntime {
         if (!doneDesc.isEmpty()) msg.append("：").append(String.join("；", doneDesc));
         if (!pendingDesc.isEmpty()) msg.append("；未执行：").append(String.join("、", pendingDesc));
         return msg.toString();
+    }
+
+    public static String buildFailureMessage(TaskGraph graph, String reason) {
+        List<String> completed = new ArrayList<>();
+        for (Node node : graph.getNodes().values()) {
+            if (node.getStatus() == NodeStatus.DONE) {
+                completed.add(node.getId() + "(" + node.executorName() + ")");
+            }
+        }
+        StringBuilder message = new StringBuilder(reason == null || reason.isBlank()
+                ? "任务关键步骤执行失败" : reason);
+        if (!completed.isEmpty()) message.append("；已完成：").append(String.join("、", completed));
+        return message.toString();
     }
 }

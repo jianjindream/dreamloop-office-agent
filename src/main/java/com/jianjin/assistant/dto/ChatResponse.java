@@ -32,6 +32,8 @@ public class ChatResponse {
     private int longTermCount;
     private Map<String, String> preferences;
     private Boolean interrupted;
+    @JsonProperty("graph_outcome")
+    private String graphOutcome;
 
     // getters/setters
     public String getTaskId() { return taskId; }
@@ -66,6 +68,8 @@ public class ChatResponse {
     public void setPreferences(Map<String, String> preferences) { this.preferences = preferences; }
     public Boolean getInterrupted() { return interrupted; }
     public void setInterrupted(Boolean interrupted) { this.interrupted = interrupted; }
+    public String getGraphOutcome() { return graphOutcome; }
+    public void setGraphOutcome(String graphOutcome) { this.graphOutcome = graphOutcome; }
 
     public static class SearchResultDto {
         private Chunk chunk;

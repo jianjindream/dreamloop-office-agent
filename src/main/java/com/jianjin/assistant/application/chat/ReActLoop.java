@@ -122,6 +122,7 @@ public class ReActLoop {
         GraphRuntime rt = new GraphRuntime(tg, cfg, GraphRuntime.Config.from(cfg),
                 ts, subAgents, query, ownerKey, sessionId, requestId, cancelled, onEvent);
         GraphRuntime.GraphResult gr = rt.execute();
+        resp.setGraphOutcome(gr.outcome.name().toLowerCase());
         // 同步图状态回 TaskState（保留旧的快照视图）
         syncGraphIntoTaskSteps(tg, currentTask);
         snapshots.save(ownerKey, currentTask);
@@ -140,12 +141,25 @@ public class ReActLoop {
             return;
         }
 
+        if (gr.outcome == GraphRuntime.GraphOutcome.FAILED) {
+            currentTask.setPhase("failed");
+            currentTask.setStatus("failed");
+            String msg = GraphRuntime.buildFailureMessage(tg, gr.failureReason);
+            reactSteps.add(new ReActStep(ReActStep.FINAL_ANSWER, "[执行失败] " + msg));
+            resp.setAnswer("[执行失败] " + msg);
+            resp.setSteps(reactSteps);
+            resp.setTask(currentTask);
+            snapshots.save(ownerKey, currentTask);
+            return;
+        }
+
         // ── Step 5: Generator LLM 综合所有观察 ───────────────────────────
         currentTask.setPhase("generating");
         String answer = generator.generate(query, gr.observations, memPrefix, histMsgs);
         reactSteps.add(new ReActStep(ReActStep.FINAL_ANSWER, answer));
         currentTask.setResult(answer);
-        currentTask.setStatus("completed");
+        currentTask.setStatus(gr.outcome == GraphRuntime.GraphOutcome.PARTIAL_SUCCESS
+                ? "partial_success" : "completed");
         currentTask.setPhase("done");
         resp.setAnswer(answer);
         resp.setSteps(reactSteps);
@@ -211,7 +225,9 @@ public class ReActLoop {
                     case FAILED -> steps.add(new ReActStep(ReActStep.OBSERVATION,
                             "执行失败: " + n.getError()));
                     case SKIPPED -> steps.add(new ReActStep(ReActStep.OBSERVATION,
-                            "[竞速跳过] 其他节点已胜出"));
+                            n.getError() == null || n.getError().isEmpty()
+                                    ? "[竞速跳过] 其他节点已胜出"
+                                    : "[依赖跳过] " + n.getError()));
                     case CANCELLED -> steps.add(new ReActStep(ReActStep.OBSERVATION, "[已中断]"));
                     default -> { /* PENDING/RUNNING：理论上不应到此 */ }
                 }
